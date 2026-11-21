@@ -110,6 +110,17 @@ export function createPanel(config, { db, requestFetch = fetch, tcpProbe } = {})
       if (!auth.session(request)) throw new RequestError(401, 'Сессия истекла. Войди через Telegram.');
       switch (route) {
         case 'GET /api/rollout': return json(response, 200, rollout.overview());
+        case 'GET /api/rollout/clouds': return json(response, 200, await rollout.clouds());
+        case 'GET /api/rollout/folders': {
+          const cloudId = new URL(request.url, config.origin).searchParams.get('cloudId');
+          return json(response, 200, await rollout.folders(cloudId));
+        }
+        case 'GET /api/rollout/network': {
+          const folderId = new URL(request.url, config.origin).searchParams.get('folderId');
+          return json(response, 200, await rollout.networkResources(folderId));
+        }
+        case 'POST /api/rollout/import': return json(response, 200, await rollout.importProject(await jsonBody(request)));
+        case 'POST /api/rollout/automation': return json(response, 200, rollout.setAutomation(await jsonBody(request)));
         case 'GET /api/rollout/dns': return json(response, 200, await rollout.dns());
         case 'POST /api/rollout/check': return json(response, 200, await rollout.checkProject(await jsonBody(request)));
         case 'POST /api/rollout/grant': return json(response, 200, rollout.setGrantState(await jsonBody(request)));
@@ -153,7 +164,10 @@ async function main() {
   const panel = createPanel(config);
   const timer = setInterval(() => void panel.bs.tick(), 15_000);
   timer.unref();
-  if (config.cloud.projects.length) setInterval(() => void panel.rollout.poll(), 30_000).unref();
+  if (config.cloud.projects.length || config.cloud.discovery) setInterval(() => {
+    void panel.rollout.poll();
+    void panel.rollout.replenish();
+  }, 30_000).unref();
   panel.server.listen(config.port, config.host, () => console.log(`Панель слушает ${config.host}:${config.port}`));
 }
 

@@ -4,12 +4,37 @@ import { RequestError } from './auth.js';
 
 const iamUrl = 'https://iam.api.cloud.yandex.net/iam/v1/tokens';
 const computeUrl = 'https://compute.api.cloud.yandex.net/compute/v1/instances';
+const resourceUrl = 'https://resource-manager.api.cloud.yandex.net/resource-manager/v1';
+const vpcUrl = 'https://vpc.api.cloud.yandex.net/vpc/v1';
+const imageUrl = 'https://compute.api.cloud.yandex.net/compute/v1/images:latestByFamily';
+export const ingressZone = 'ru-central1-d';
 const operationsUrl = 'https://operation.api.cloud.yandex.net/operations';
 const dnsName = 'tg.ebunny.cloud';
 const safeId = (value) => typeof value === 'string' && /^[a-z0-9]{8,64}$/i.test(value);
 const yamlString = (value) => JSON.stringify(value);
 export const grantStates = ['available', 'exhausted', 'paused'];
 const oauthTokenValid = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{16,4000}$/.test(value);
+
+function sshSettingsValid(entry) {
+  return /^[a-z_][a-z0-9_-]{0,31}$/.test(entry.sshUser ?? '') && entry.sshUser !== 'root' &&
+    /^ssh-ed25519 [A-Za-z0-9+/=]{60,120}(?: [^\r\n]{1,120})?$/.test(entry.sshPublicKey ?? '');
+}
+
+function validateIdentity(entry) {
+  if (entry.oauthToken !== undefined) {
+    if (entry.key !== undefined || !oauthTokenValid(entry.oauthToken)) {
+      throw new Error('Задай один способ входа в Яндекс: OAuth-токен либо ключ сервисного аккаунта.');
+    }
+    return;
+  }
+  try {
+    if (!safeId(entry.key?.id) || !safeId(entry.key?.service_account_id)) throw new Error();
+    const privateKey = createPrivateKey(entry.key.private_key.replace(/^PLEASE DO NOT REMOVE THIS LINE![^\n]*\r?\n/, ''));
+    if (privateKey.asymmetricKeyType !== 'rsa' || privateKey.asymmetricKeyDetails.modulusLength < 2048) throw new Error();
+  } catch {
+    throw new Error('Не удалось прочитать RSA-ключ сервисного аккаунта Yandex Cloud.');
+  }
+}
 
 export function validateCloudConfig(value) {
   if (value == null) return { projects: [] };
@@ -18,27 +43,25 @@ export function validateCloudConfig(value) {
   for (const project of value.projects) {
     if (!project || !/^[a-z0-9-]{1,32}$/.test(project.id ?? '') || keys.has(project.id) ||
         ![project.folderId, project.subnetId, project.securityGroupId, project.imageId].every(safeId) ||
-        !/^[a-z_][a-z0-9_-]{0,31}$/.test(project.sshUser ?? '') || project.sshUser === 'root' ||
-        !/^ssh-ed25519 [A-Za-z0-9+/=]{60,120}(?: [^\r\n]{1,120})?$/.test(project.sshPublicKey ?? '') ||
+        !sshSettingsValid(project) ||
         (project.name != null && (typeof project.name !== 'string' || project.name.length > 80)) ||
         (project.priority != null && (!Number.isSafeInteger(project.priority) || project.priority < 1 || project.priority > 10000)) ||
         (project.grantState != null && !grantStates.includes(project.grantState))) {
       throw new Error('Некорректные параметры одного из проектов Yandex Cloud.');
     }
-    if (project.oauthToken !== undefined) {
-      if (project.key !== undefined || !oauthTokenValid(project.oauthToken)) {
-        throw new Error('Для проекта Яндекса задай один способ входа: OAuth-токен либо ключ сервисного аккаунта.');
-      }
-    } else {
-      try {
-        if (!safeId(project.key?.id) || !safeId(project.key?.service_account_id)) throw new Error();
-        const privateKey = createPrivateKey(project.key.private_key.replace(/^PLEASE DO NOT REMOVE THIS LINE![^\n]*\r?\n/, ''));
-        if (privateKey.asymmetricKeyType !== 'rsa' || privateKey.asymmetricKeyDetails.modulusLength < 2048) throw new Error();
-      } catch {
-        throw new Error('Не удалось прочитать RSA-ключ сервисного аккаунта Yandex Cloud.');
-      }
-    }
+    validateIdentity(project);
     keys.add(project.id);
+  }
+  const discovery = value.discovery;
+  if (discovery != null) {
+    if (typeof discovery !== 'object' || !sshSettingsValid(discovery) ||
+        (discovery.organizationId != null && !safeId(discovery.organizationId)) ||
+        (discovery.imageId != null && !safeId(discovery.imageId)) ||
+        (discovery.imageFamily != null && !/^[a-z][a-z0-9-]{2,62}$/.test(discovery.imageFamily)) ||
+        (discovery.imageId && discovery.imageFamily)) {
+      throw new Error('Некорректный общий шаблон обнаружения ресурсов Яндекса.');
+    }
+    validateIdentity(discovery);
   }
   if (value.cloudflare != null && (!/^[a-f0-9]{32}$/i.test(value.cloudflare.zoneId ?? '') ||
       !/^[a-f0-9]{32}$/i.test(value.cloudflare.recordId ?? '') ||
@@ -103,7 +126,7 @@ export function vmRequest(project, name) {
     folderId: project.folderId,
     name,
     labels: { 'ebunny-role': 'ingress-candidate' },
-    zoneId: 'ru-central1-d',
+    zoneId: ingressZone,
     platformId: 'standard-v3',
     resourcesSpec: { cores: '2', coreFraction: '50', memory: '2147483648' },
     schedulingPolicy: { preemptible: false },
@@ -141,6 +164,28 @@ export function createProviders(config, requestFetch) {
     }
   }
 
+  const catalogIdentity = config.discovery && { ...config.discovery, id: ':discovery' };
+  const catalogGet = async (provider, url) => {
+    if (!catalogIdentity) throw new RequestError(409, 'Сначала подключи общий доступ Yandex Cloud.');
+    return api(requestFetch, provider, url, { token: await getToken(catalogIdentity) });
+  };
+
+  async function listCatalog(provider, endpoint, field, filter) {
+    const query = new URLSearchParams({ ...filter, pageSize: '100' });
+    const resources = [];
+    for (let page = 0; page < 10; page += 1) {
+      const response = await catalogGet(provider, `${endpoint}?${query}`);
+      const items = response[field] ?? [];
+      if (!Array.isArray(items)) throw new ProviderError(provider, null);
+      resources.push(...items);
+      if (!response.nextPageToken) return resources;
+      query.set('pageToken', response.nextPageToken);
+    }
+    throw new RequestError(409, 'Слишком много ресурсов для одного списка.');
+  }
+
+  const catalogItem = ({ id, name }) => ({ id, name: typeof name === 'string' ? name : id });
+
   async function getDns() {
     const cf = config.cloudflare;
     if (!cf) throw new RequestError(409, 'Сначала подключи Cloudflare.');
@@ -155,6 +200,37 @@ export function createProviders(config, requestFetch) {
   }
 
   return {
+    async clouds() {
+      const filter = config.discovery?.organizationId ? { organizationId: config.discovery.organizationId } : {};
+      const clouds = await listCatalog('Yandex Resource Manager', `${resourceUrl}/clouds`, 'clouds', filter);
+      return clouds.filter(({ id }) => safeId(id)).map(catalogItem);
+    },
+    async folders(cloudId) {
+      if (!safeId(cloudId)) throw new RequestError(400, 'Некорректный ID облака.');
+      const folders = await listCatalog('Yandex Resource Manager', `${resourceUrl}/folders`, 'folders', { cloudId });
+      return folders.filter(({ id, status }) => safeId(id) && status === 'ACTIVE').map(catalogItem);
+    },
+    async networkResources(folderId) {
+      if (!safeId(folderId)) throw new RequestError(400, 'Некорректный ID каталога.');
+      const [subnets, securityGroups] = await Promise.all([
+        listCatalog('Yandex VPC', `${vpcUrl}/subnets`, 'subnets', { folderId }),
+        listCatalog('Yandex VPC', `${vpcUrl}/securityGroups`, 'securityGroups', { folderId }),
+      ]);
+      return {
+        subnets: subnets.filter(({ id, networkId, zoneId }) => safeId(id) && safeId(networkId) && zoneId === ingressZone)
+          .map((subnet) => ({ ...catalogItem(subnet), networkId: subnet.networkId })),
+        securityGroups: securityGroups.filter(({ id, networkId, status }) => safeId(id) && safeId(networkId) && status === 'ACTIVE')
+          .map((group) => ({ ...catalogItem(group), networkId: group.networkId })),
+      };
+    },
+    async templateImage() {
+      if (!catalogIdentity) throw new RequestError(409, 'Сначала подключи общий доступ Yandex Cloud.');
+      if (catalogIdentity.imageId) return catalogIdentity.imageId;
+      const query = new URLSearchParams({ folderId: 'standard-images', family: catalogIdentity.imageFamily ?? 'ubuntu-2404-lts' });
+      const image = await catalogGet('Yandex Compute', `${imageUrl}?${query}`);
+      if (!safeId(image.id) || image.status !== 'READY') throw new RequestError(502, 'Образ из шаблона ещё недоступен.');
+      return image.id;
+    },
     prepareProject: async (project) => { await getToken(project); },
     async checkProject(project) {
       const accessToken = await getToken(project, true);

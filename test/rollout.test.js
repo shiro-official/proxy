@@ -154,3 +154,87 @@ test('checks official user OAuth without creating a VM and requires explicit pro
   assert(!publicState.includes(firstToken));
   assert(!publicState.includes(spareToken));
 });
+
+test('discovers resources with one identity, imports a project and only creates a reserve after opt-in', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  const sharedToken = 'test-shared-oauth-token-123';
+  const cloud = validateCloudConfig({ projects: [], discovery: {
+    oauthToken: sharedToken, sshUser: 'bunny', sshPublicKey: `ssh-ed25519 ${'A'.repeat(68)} testing`,
+    imageFamily: 'ubuntu-2404-lts',
+  } });
+  let writes = 0;
+  let fail = false;
+  const now = 1_700_000_000_000;
+  const controls = createRollout(db, cloud, async (url, init) => {
+    const parsed = new URL(url);
+    const { pathname, searchParams } = parsed;
+    if (parsed.hostname === 'iam.api.cloud.yandex.net') {
+      assert.deepEqual(JSON.parse(init.body), { yandexPassportOauthToken: sharedToken });
+      return Response.json({ iamToken: 'short-iam-token' });
+    }
+    assert.equal(init.headers.Authorization, 'Bearer short-iam-token');
+    if (pathname.endsWith('/clouds')) {
+      return searchParams.has('pageToken')
+        ? Response.json({ clouds: [{ id: 'cloudtwo2', name: 'Shared cloud' }] })
+        : Response.json({ clouds: [{ id: 'cloudone1', name: 'Main cloud' }], nextPageToken: 'page-two' });
+    }
+    if (pathname.endsWith('/folders')) {
+      assert.equal(searchParams.get('cloudId'), 'cloudone1');
+      return Response.json({ folders: [{ id: 'folder123', name: 'Pilot', status: 'ACTIVE' }, { id: 'folder456', name: 'Removed', status: 'DELETING' }] });
+    }
+    if (pathname.endsWith('/subnets')) return Response.json({ subnets: [
+      { id: 'subnet123', name: 'Entrance', networkId: 'network123', zoneId: 'ru-central1-d' },
+      { id: 'subnet456', name: 'Other zone', networkId: 'network123', zoneId: 'ru-central1-a' },
+    ] });
+    if (pathname.endsWith('/securityGroups')) return Response.json({ securityGroups: [
+      { id: 'group1234', name: 'Ingress', networkId: 'network123', status: 'ACTIVE' },
+      { id: 'group5678', name: 'Different network', networkId: 'network456', status: 'ACTIVE' },
+    ] });
+    if (pathname.endsWith('/images:latestByFamily')) {
+      assert.equal(searchParams.get('folderId'), 'standard-images');
+      assert.equal(searchParams.get('family'), 'ubuntu-2404-lts');
+      return Response.json({ id: 'image1234', status: 'READY' });
+    }
+    if (pathname.endsWith('/instances') && init.method === 'GET') return Response.json({ instances: [] });
+    if (pathname.endsWith('/instances') && init.method === 'POST') {
+      writes += 1;
+      const body = JSON.parse(init.body);
+      assert.equal(body.folderId, 'folder123');
+      assert.equal(body.networkInterfaceSpecs[0].subnetId, 'subnet123');
+      assert.equal(body.bootDiskSpec.diskSpec.imageId, 'image1234');
+      assert(!JSON.stringify(body).includes(sharedToken));
+      return fail ? Response.json({ code: 8 }, { status: 429 }) : Response.json({ id: 'operation1' });
+    }
+    assert.fail(`Unexpected request: ${url}`);
+  });
+
+  assert.equal(controls.overview().discovery, true);
+  assert.equal(controls.overview().automation.enabled, false);
+  assert.equal((await controls.clouds()).length, 2);
+  assert.deepEqual(await controls.folders('cloudone1'), [{ id: 'folder123', name: 'Pilot' }]);
+  assert.equal((await controls.networkResources('folder123')).subnets.length, 1);
+  await assert.rejects(controls.importProject({ folderId: 'folder123', name: 'Pilot', subnetId: 'subnet123', securityGroupId: 'group5678' }), /в той же сети/);
+  const args = { folderId: 'folder123', name: 'Pilot', subnetId: 'subnet123', securityGroupId: 'group1234' };
+  const project = await controls.importProject(args);
+  await assert.rejects(controls.importProject(args), /уже подключён/);
+  assert(!JSON.stringify(controls.overview()).includes(sharedToken));
+  await controls.replenish(now);
+  assert.equal(writes, 0);
+  assert.throws(() => controls.setAutomation({ enabled: true, project: project.id }), /подтверди расходы/);
+  controls.setAutomation({ enabled: true, project: project.id, confirmCost: true });
+  await Promise.all([controls.replenish(now), controls.replenish(now)]);
+  await controls.replenish(now + 20 * 60_000);
+  assert.equal(writes, 1);
+  const row = controls.overview().candidates[0];
+  db.prepare("UPDATE ingress_candidates SET state = 'active' WHERE id = ?").run(row.id);
+  await controls.replenish(now + 1000);
+  assert.equal(writes, 1);
+
+  fail = true;
+  await controls.replenish(now + 20 * 60_000);
+  assert.equal(writes, 2);
+  assert.equal(controls.overview().automation.enabled, false);
+  await controls.replenish(now + 40 * 60_000);
+  assert.equal(writes, 2);
+});

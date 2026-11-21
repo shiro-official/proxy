@@ -70,9 +70,119 @@ function projectsSection(projects) {
     </form>` : '<p class="notice">Нет доступного проекта для создания ВМ.</p>'}`;
 }
 
+function catalogSection(enabled) {
+  if (!enabled) return '';
+  return `<details class="rollout-projects" data-catalog>
+    <summary>Подключить проект из Яндекса</summary>
+    <div class="rollout-form">
+      <button class="button" type="button" data-clouds>Загрузить облака</button>
+      <label data-cloud-field hidden>Облако<select data-cloud></select></label>
+      <label data-folder-field hidden>Каталог<select data-folder></select></label>
+    </div>
+    <form class="rollout-form" data-network>
+      <label>ID каталога<input name="folder" required maxlength="64" autocomplete="off"></label>
+      <button class="button" type="submit">Показать подсети и группы</button>
+    </form>
+    <form class="rollout-form" data-import hidden>
+      <label>Название проекта<input name="name" maxlength="80" autocomplete="off"></label>
+      <label>Подсеть в ru-central1-d<select name="subnet" required></select></label>
+      <label>Группа безопасности<select name="group" required></select></label>
+      <button class="button primary" type="submit">Подключить проект</button>
+    </form>
+    <p class="notice" data-catalog-status role="status"></p>
+  </details>`;
+}
+
+function automationSection(data) {
+  const available = data.projects.filter(({ grantState }) => grantState === 'available');
+  if (!data.projects.length && !data.automation.enabled && !data.automation.message) return '';
+  const { enabled, project, message } = data.automation;
+  const name = data.projects.find((item) => item.id === project)?.name;
+  return `<details class="rollout-projects"${enabled || message ? ' open' : ''}>
+    <summary>Автосоздание резерва · ${enabled ? 'Включено' : 'Выключено'}</summary>
+    <p class="notice">Панель создаёт одну резервную ВМ в выбранном проекте. После переключения на неё панель может создать следующий резерв.</p>
+    ${message ? `<p class="notice">${escape(message)}</p>` : ''}
+    ${enabled ? `<div class="rollout-dns"><strong>${escape(name ?? project)}</strong>
+      <button class="button" type="button" data-stop-automatic>Отключить автосоздание</button></div>`
+      : available.length ? `<form class="rollout-form" data-automatic>
+        <label>Проект для резерва<select name="project" required><option value="" disabled selected>Выбери проект</option>
+          ${available.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)}</option>`).join('')}</select></label>
+        <label class="bs-checkbox"><input type="checkbox" required> Разрешаю платное создание и пополнение резерва в этом проекте.</label>
+        <button class="button primary" type="submit">Поддерживать один резерв</button>
+      </form>` : ''}
+  </details>`;
+}
+
+function optionList(items, label) {
+  return `<option value="" disabled selected>${label}</option>${items.map(({ id, name }) =>
+    `<option value="${escape(id)}">${escape(name)} · ${escape(id)}</option>`).join('')}`;
+}
+
+function bindCatalog(root, run, refresh) {
+  const catalog = root.querySelector('[data-catalog]');
+  if (!catalog) return;
+  const feedback = catalog.querySelector('[data-catalog-status]');
+  const cloud = catalog.querySelector('[data-cloud]');
+  const folder = catalog.querySelector('[data-folder]');
+  const network = catalog.querySelector('[data-network]');
+  const importer = catalog.querySelector('[data-import]');
+  let resources;
+  let folderId;
+  const clearNetwork = () => { importer.hidden = true; folderId = undefined; };
+  const showGroups = () => {
+    const selected = resources.subnets.find((subnet) => subnet.id === importer.elements.subnet.value);
+    importer.elements.group.innerHTML = optionList(resources.securityGroups.filter((group) => group.networkId === selected?.networkId), 'Выбери группу');
+  };
+  catalog.querySelector('[data-clouds]').onclick = () => void run(async () => {
+    const clouds = await api('/clouds');
+    cloud.innerHTML = optionList(clouds, 'Выбери облако');
+    catalog.querySelector('[data-cloud-field]').hidden = !clouds.length;
+    feedback.textContent = clouds.length ? 'Выбери облако или введи ID каталога.' : 'Список облаков пуст. Можно указать ID каталога вручную.';
+  }, feedback);
+
+  cloud.onchange = () => void run(async () => {
+    const folders = await api(`/folders?cloudId=${encodeURIComponent(cloud.value)}`);
+    folder.innerHTML = optionList(folders, 'Выбери каталог');
+    catalog.querySelector('[data-folder-field]').hidden = !folders.length;
+    feedback.textContent = folders.length ? 'Выбери нужный каталог.' : 'В облаке не найдено доступных каталогов.';
+  }, feedback);
+
+  const loadNetwork = () => void run(async () => {
+    clearNetwork();
+    const chosen = network.elements.folder.value.trim();
+    resources = await api(`/network?folderId=${encodeURIComponent(chosen)}`);
+    if (chosen !== network.elements.folder.value.trim()) return;
+    folderId = chosen;
+    importer.elements.subnet.innerHTML = optionList(resources.subnets, 'Выбери подсеть');
+    showGroups();
+    importer.hidden = !resources.subnets.length;
+    feedback.textContent = resources.subnets.length ? 'Выбери подсеть и группу из той же сети.' : 'В каталоге нет доступных подсетей ru-central1-d.';
+  }, feedback);
+
+  folder.onchange = () => {
+    network.elements.folder.value = folder.value;
+    importer.elements.name.value = folder.selectedOptions[0].text.split(' · ')[0];
+    loadNetwork();
+  };
+  network.elements.folder.oninput = clearNetwork;
+  importer.elements.subnet.onchange = showGroups;
+  network.onsubmit = (event) => { event.preventDefault(); loadNetwork(); };
+  importer.onsubmit = (event) => {
+    event.preventDefault();
+    if (!folderId) return;
+    void run(async () => {
+      const data = new FormData(importer);
+      await api('/import', { folderId, name: data.get('name'), subnetId: data.get('subnet'), securityGroupId: data.get('group') });
+      await refresh('Проект подключён. Его можно выбрать для создания ВМ.');
+    }, feedback);
+  };
+}
+
 function page(data, dns, dnsError) {
   return `<div class="panel-top"><div><h2>Резерв и перенос входа</h2><p>Yandex Cloud · Cloudflare</p></div></div>
+    ${catalogSection(data.discovery)}
     ${projectsSection(data.projects)}
+    ${automationSection(data)}
     ${data.cloudflare ? `<div class="rollout-dns"><span>Cloudflare · текущее значение A-записи</span><strong class="mono">${escape(dns?.ip ?? '—')}</strong><button class="button" type="button" data-reload>Обновить DNS</button></div>` :
       '<p class="notice">Для переключения DNS подключи токен Cloudflare с правом редактирования этой зоны.</p>'}
     ${dnsError ? `<p class="notice">${escape(dnsError)}</p>` : ''}
@@ -119,6 +229,21 @@ export async function mountRollout(root, message = '') {
       buttons.forEach((button) => { button.disabled = false; });
     }
   };
+
+  bindCatalog(root, run, (note) => mountRollout(root, note));
+  const auto = root.querySelector('[data-automatic]');
+  if (auto) auto.onsubmit = (event) => {
+    event.preventDefault();
+    void run(async () => {
+      await api('/automation', { enabled: true, project: auto.elements.project.value, confirmCost: true });
+      await mountRollout(root, 'Автосоздание резерва включено.');
+    });
+  };
+  const stopAutomatic = root.querySelector('[data-stop-automatic]');
+  if (stopAutomatic) stopAutomatic.onclick = () => void run(async () => {
+    await api('/automation', { enabled: false });
+    await mountRollout(root, 'Автосоздание отключено.');
+  });
 
   const create = root.querySelector('[data-create]');
   if (create) {

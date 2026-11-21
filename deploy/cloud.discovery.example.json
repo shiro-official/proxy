@@ -1,0 +1,9 @@
+{
+  "projects": [],
+  "discovery": {
+    "oauthToken": "<YANDEX_CLOUD_OAUTH_TOKEN>",
+    "sshUser": "bunny",
+    "sshPublicKey": "ssh-ed25519 <PUBLIC_KEY>",
+    "imageFamily": "ubuntu-2404-lts"
+  }
+}
