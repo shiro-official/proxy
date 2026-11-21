@@ -8,12 +8,14 @@ import { createBscheck } from './bscheck.js';
 import { readConfig } from './config.js';
 import { createAudience } from './audience.js';
 import { createTelemetry } from './telemetry.js';
+import { createRollout } from './rollout.js';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8', true]],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8', true]],
   ['/bootstrap.js', ['bootstrap.js', 'text/javascript; charset=utf-8', true]],
   ['/assets/hero.webp', ['assets/hero.webp', 'image/webp', true]],
+  ['/rollout.js', ['rollout.js', 'text/javascript; charset=utf-8', false]],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8', false]],
   ['/audience.js', ['audience.js', 'text/javascript; charset=utf-8', false]],
   ['/checks.js', ['checks.js', 'text/javascript; charset=utf-8', false]],
@@ -44,7 +46,7 @@ function json(response, status, body, cookies) {
   response.end(JSON.stringify(body));
 }
 
-export function createPanel(config, { db, requestFetch = fetch } = {}) {
+export function createPanel(config, { db, requestFetch = fetch, tcpProbe } = {}) {
   if (!db) {
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     const dbFile = join(config.dataDir, 'ebunny.sqlite');
@@ -56,6 +58,7 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
   const bs = createBscheck(db, config.masterKey, requestFetch);
   const audience = createAudience(db, config);
   const telemetry = createTelemetry(db, config.telemetryKey);
+  const rollout = createRollout(db, config.cloud ?? { projects: [] }, requestFetch, tcpProbe);
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -106,6 +109,11 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
       if (!path.startsWith('/api/')) throw new RequestError(404, 'Страница не найдена.');
       if (!auth.session(request)) throw new RequestError(401, 'Сессия истекла. Войди через Telegram.');
       switch (route) {
+        case 'GET /api/rollout': return json(response, 200, rollout.overview());
+        case 'GET /api/rollout/dns': return json(response, 200, await rollout.dns());
+        case 'POST /api/rollout/reserve': return json(response, 200, await rollout.reserve(await jsonBody(request)));
+        case 'POST /api/rollout/refresh': return json(response, 200, await rollout.refresh(await jsonBody(request)));
+        case 'POST /api/rollout/publish': return json(response, 200, await rollout.publish(await jsonBody(request)));
         case 'GET /api/telemetry': return json(response, 200, telemetry.report(new URL(request.url, config.origin).searchParams.get('period') ?? undefined));
         case 'GET /api/audience': return json(response, 200, audience.report());
         case 'GET /api/bscheck': return json(response, 200, bs.summary());
@@ -124,7 +132,7 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
     }
   });
   server.requestTimeout = 30_000;
-  return { server, db, auth, bs };
+  return { server, db, auth, bs, rollout };
 }
 
 async function main() {
@@ -143,6 +151,7 @@ async function main() {
   const panel = createPanel(config);
   const timer = setInterval(() => void panel.bs.tick(), 15_000);
   timer.unref();
+  if (config.cloud.projects.length) setInterval(() => void panel.rollout.poll(), 30_000).unref();
   panel.server.listen(config.port, config.host, () => console.log(`Панель слушает ${config.host}:${config.port}`));
 }
 

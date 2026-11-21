@@ -1,5 +1,6 @@
 import { audience, bindAudience, mountAudience } from './audience.js';
 import { checks, mountChecks } from './checks.js';
+import { mountRollout } from './rollout.js';
 
 const paths = {
   overview: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -217,7 +218,8 @@ function ingress() {
     <dl class="facts"><div><dt>Домен</dt><dd class="mono">${domain}:443</dd></div><div><dt>Публичный IPv4</dt><dd class="mono">${entranceIp()}</dd></div>
     <div><dt>Протокол</dt><dd>MTProto / FakeTLS</dd></div><div><dt>Канал</dt><dd><a href="https://t.me/eBunnyVPN" target="_blank" rel="noopener noreferrer">@eBunnyVPN ${icon('external', 14)}</a></dd></div></dl></section>
     <section class="panel content-panel"><div class="panel-top"><div><h2>Профиль создания ВМ</h2><p>Для новых входов</p></div><span class="icon-box lime">${icon('server')}</span></div>
-    <dl class="facts">${profile.map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="notice">${icon('info', 16)} Создание через Yandex Cloud API ещё не подключено.</p></section></div>`;
+    <dl class="facts">${profile.map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join('')}</dl></section></div>
+    ${demo ? '' : '<section class="panel content-panel" id="ingress-rollout"><p class="notice">Загружаем настройки облака…</p></section>'}`;
 }
 
 function exits() {
@@ -247,6 +249,7 @@ function render() {
     ${demo ? '<span class="demo-badge"><i></i>Демо-режим</span>' : '<button type="button" class="button" data-logout>Выйти</button>'}<button class="button primary" type="button" data-add>${icon('plus', 17)} Добавить EU-ноду</button>
     </div></header><div class="page-content">${pages[active]()}</div>`;
   document.title = `${sections[active][0]} · eBunny`;
+  if (active === 'ingress' && !demo) void mountRollout(main.querySelector('#ingress-rollout'));
   if (active === 'overview' && !demo) void updateOverview(main.querySelector('#overview-data'));
   if (active === 'checks' && !demo) void mountChecks(main.querySelector('#bscheck-app'));
   if (active === 'audience') {

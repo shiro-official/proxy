@@ -1,4 +1,6 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { validateCloudConfig } from './providers.js';
 
 export function readConfig(env = process.env) {
   const origin = new URL(env.PANEL_ORIGIN || 'http://127.0.0.1:4180');
@@ -18,7 +20,18 @@ export function readConfig(env = process.env) {
   if (env.TELEMETRY_INGEST_KEY && !/^[a-f\d]{64}$/i.test(env.TELEMETRY_INGEST_KEY)) {
     throw new Error('TELEMETRY_INGEST_KEY должен содержать 64 hex-символа.');
   }
+  const bundled = env.CREDENTIALS_DIRECTORY && join(env.CREDENTIALS_DIRECTORY, 'ebunny-cloud.json');
+  const cloudPath = env.PANEL_CLOUD_CONFIG_PATH || (bundled && existsSync(bundled) ? bundled : undefined);
+  let cloud;
+  if (cloudPath) {
+    try {
+      cloud = JSON.parse(readFileSync(cloudPath, 'utf8'));
+    } catch {
+      throw new Error('Не удалось прочитать JSON конфигурации облачных API.');
+    }
+  }
   return {
+    cloud: validateCloudConfig(cloud),
     telemetryKey: env.TELEMETRY_INGEST_KEY,
     audienceKey: env.AUDIENCE_INGEST_KEY,
     origin: origin.origin,

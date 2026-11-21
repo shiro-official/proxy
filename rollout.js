@@ -1,0 +1,133 @@
+const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+})[char]);
+const stateText = {
+  creating: 'Запрос подготовлен',
+  pending: 'ВМ создаётся',
+  uncertain: 'Операцию нужно сверить',
+  prepared: 'ВМ запущена',
+  failed: 'Ошибка ВМ',
+  active: 'DNS переключён',
+};
+const time = new Intl.DateTimeFormat('ru-RU', {
+  dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow',
+});
+
+async function api(path = '', body) {
+  const response = await fetch(`/api/rollout${path}`, body === undefined ? undefined : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    location.reload();
+    throw new Error('Сессия истекла.');
+  }
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Операция не прошла.');
+  return data;
+}
+
+function candidateCard(row, dns, projects) {
+  const canRefresh = !['active', 'failed'].includes(row.state);
+  const canPublish = row.state === 'prepared' && row.ip && dns?.ip;
+  return `<article class="rollout-candidate">
+    <div class="panel-top"><div><h3>${escape(row.name)}</h3><p>${escape(projects.find(({ id }) => id === row.project)?.name ?? row.project)} · ${time.format(row.created)} МСК</p></div>
+      <span class="status ${row.state === 'active' ? 'lime' : 'pink'}"><i></i>${stateText[row.state]}</span></div>
+    ${row.operation_id ? `<p class="notice">Операция Яндекса: <code>${escape(row.operation_id)}</code></p>` : ''}
+    ${row.ip ? `<p class="rollout-ip mono">${escape(row.ip)}:443</p>` : ''}
+    ${row.message ? `<p class="notice">${escape(row.message)}</p>` : ''}
+    ${row.state === 'prepared' ? '<p class="notice">Настрой WireGuard и Telemt на резерве и проверь подключение по его адресу.</p>' : ''}
+    ${row.state === 'uncertain' ? '<p class="notice">Обновление статуса проверяет уже отправленную операцию.</p>' : ''}
+    ${canRefresh ? `<button class="button" type="button" data-refresh="${escape(row.id)}">Обновить статус ВМ</button>` : ''}
+    ${canPublish ? `<form data-publish="${escape(row.id)}" data-ip="${escape(row.ip)}" class="rollout-form">
+      <label class="bs-checkbox"><input type="checkbox" name="confirmed" required> Telegram подключился через этот IP, чаты и медиа загрузились.</label>
+      <p class="notice">A-запись tg.ebunny.cloud изменится с ${escape(dns.ip)} на ${escape(row.ip)}.</p>
+      <button class="button primary" type="submit">Переключить DNS</button>
+    </form>` : ''}
+  </article>`;
+}
+
+function page(data, dns, dnsError) {
+  return `<div class="panel-top"><div><h2>Резерв и перенос входа</h2><p>Yandex Cloud · Cloudflare</p></div></div>
+    ${!data.projects.length ? '<p class="notice">Подключи сервисный аккаунт Яндекса и параметры проекта на сервере панели.</p>' : `<form class="rollout-form" data-create>
+      <label>Проект Яндекса<select name="project" required>${data.projects.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)}</option>`).join('')}</select></label>
+      <label class="bs-checkbox"><input type="checkbox" required> Подтверждаю создание платной ВМ по профилю, указанному выше.</label>
+      <button class="button primary" type="submit">Создать резервную ВМ</button>
+    </form>`}
+    ${data.cloudflare ? `<div class="rollout-dns"><span>Cloudflare · текущее значение A-записи</span><strong class="mono">${escape(dns?.ip ?? '—')}</strong><button class="button" type="button" data-reload>Обновить DNS</button></div>` :
+      '<p class="notice">Для переключения DNS подключи токен Cloudflare с правом редактирования этой зоны.</p>'}
+    ${dnsError ? `<p class="notice">${escape(dnsError)}</p>` : ''}
+    ${data.candidates.map((row) => candidateCard(row, dns, data.projects)).join('')}
+    ${data.switches.length ? `<h3 class="bs-history-title">Переключения DNS</h3>
+      <ul class="rollout-log">${data.switches.map((event) => `<li><span>${time.format(event.created)} МСК</span><span class="mono">${escape(event.previous_ip)} → ${escape(event.target_ip)}</span><span>${event.state === 'done' ? 'Подтверждено' : 'Сверь DNS'}${event.message ? ` · ${escape(event.message)}` : ''}</span></li>`).join('')}</ul>` : ''}
+    <p class="form-error" role="status"></p>`;
+}
+
+export async function mountRollout(root, message = '') {
+  let data;
+  try {
+    data = await api();
+  } catch (error) {
+    root.textContent = error.message;
+    return;
+  }
+  let dns;
+  let dnsError;
+  if (data.cloudflare) {
+    try {
+      dns = await api('/dns');
+    } catch (error) {
+      dnsError = error.message;
+    }
+  }
+  if (!root.isConnected) return;
+  root.innerHTML = page(data, dns, dnsError);
+  const notification = root.querySelector('[role="status"]');
+  notification.textContent = message;
+  const buttons = [...root.querySelectorAll('button')];
+  let busy = false;
+  const run = async (action) => {
+    if (busy) return;
+    busy = true;
+    buttons.forEach((button) => { button.disabled = true; });
+    notification.textContent = 'Операция выполняется…';
+    try {
+      await action();
+    } catch (error) {
+      notification.textContent = error.message;
+    } finally {
+      busy = false;
+      buttons.forEach((button) => { button.disabled = false; });
+    }
+  };
+
+  const create = root.querySelector('[data-create]');
+  if (create) {
+    let requestId;
+    create.elements.project.onchange = () => { requestId = undefined; };
+    create.onsubmit = (event) => {
+      event.preventDefault();
+      void run(async () => {
+        requestId ??= crypto.randomUUID();
+        const row = await api('/reserve', { requestId, project: create.elements.project.value, confirmCost: true });
+        await mountRollout(root, row.state === 'pending' ? 'Запрос на создание принят. Обнови статус ВМ.' : stateText[row.state]);
+      });
+    };
+  }
+  for (const button of root.querySelectorAll('[data-refresh]')) {
+    button.onclick = () => void run(async () => {
+      const row = await api('/refresh', { id: button.dataset.refresh });
+      await mountRollout(root, stateText[row.state]);
+    });
+  }
+  for (const form of root.querySelectorAll('[data-publish]')) {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      void run(async () => {
+        await api('/publish', { id: form.dataset.publish, expectedIp: dns.ip, targetIp: form.dataset.ip, confirmMtproto: true });
+        await mountRollout(root, 'Cloudflare подтвердил новый адрес.');
+      });
+    };
+  }
+  const reload = root.querySelector('[data-reload]');
+  if (reload) reload.onclick = () => void mountRollout(root);
+}

@@ -1,0 +1,24 @@
+{
+  "projects": [
+    {
+      "id": "pilot",
+      "name": "Проект Яндекса",
+      "folderId": "<FOLDER_ID>",
+      "subnetId": "<SUBNET_ID>",
+      "securityGroupId": "<SECURITY_GROUP_ID>",
+      "imageId": "<UBUNTU_24_04_IMAGE_ID>",
+      "sshUser": "bunny",
+      "sshPublicKey": "ssh-ed25519 <PUBLIC_KEY>",
+      "key": {
+        "id": "<AUTHORIZED_KEY_ID>",
+        "service_account_id": "<SERVICE_ACCOUNT_ID>",
+        "private_key": "<PRIVATE_KEY_FROM_YANDEX_JSON>"
+      }
+    }
+  ],
+  "cloudflare": {
+    "zoneId": "<EBUNNY_CLOUD_ZONE_ID>",
+    "recordId": "<TG_EBUNNY_CLOUD_A_RECORD_ID>",
+    "token": "<DNS_API_TOKEN>"
+  }
+}
