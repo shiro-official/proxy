@@ -71,7 +71,11 @@ function projectsSection(projects) {
 }
 
 function catalogSection(enabled) {
-  if (!enabled) return '';
+  if (!enabled) return `<details class="rollout-projects" open>
+    <summary>Подключить проект из Яндекса · Требуется настройка</summary>
+    <p class="notice">Настрой общий доступ Yandex Cloud на VPS с панелью. После перезапуска здесь появится выбор каталога и сети.</p>
+    <a class="text-link" href="https://github.com/shiro-official/proxy/tree/panel#подключение-проектов-по-общему-доступу" target="_blank" rel="noopener noreferrer">Инструкция подключения</a>
+  </details>`;
   return `<details class="rollout-projects" data-catalog>
     <summary>Подключить проект из Яндекса</summary>
     <div class="rollout-form">
@@ -95,7 +99,9 @@ function catalogSection(enabled) {
 
 function automationSection(data) {
   const available = data.projects.filter(({ grantState }) => grantState === 'available');
-  if (!data.projects.length && !data.automation.enabled && !data.automation.message) return '';
+  if (!data.projects.length && !data.automation.enabled && !data.automation.message) {
+    return '<details class="rollout-projects"><summary>Автосоздание резерва · Выключено</summary><p class="notice">Сначала подключи хотя бы один проект Яндекса.</p></details>';
+  }
   const { enabled, project, message } = data.automation;
   const name = data.projects.find((item) => item.id === project)?.name;
   return `<details class="rollout-projects"${enabled || message ? ' open' : ''}>
