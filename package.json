@@ -1,0 +1,11 @@
+{
+  "name": "ebunny-panel",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node --env-file=.env server/index.js",
+    "telegram:webhook": "node --env-file=.env server/index.js --register-webhook",
+    "test": "node --test"
+  }
+}

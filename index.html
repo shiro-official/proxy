@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101015">
+  <title>eBunny — панель прокси</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23252b1f'/%3E%3Cpath d='M11 14C7 10 8 3 10 3c2 0 4 6 5 9h2c1-3 3-9 5-9 2 0 3 7-1 11 4 2 6 5 6 8 0 5-5 7-11 7S5 27 5 22c0-3 2-6 6-8Zm1 7h.1m7.8 0h.1' fill='none' stroke='%23c9f675' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./bootstrap.js"></script>
+</head>
+<body data-runtime="static">
+  <a class="skip-link" href="#main">К основному содержимому</a>
+  <div class="layout" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="eBunny, обзор">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none"><path d="M11 14C7 10 8 3 10 3c2 0 4 6 5 9h2c1-3 3-9 5-9 2 0 3 7-1 11 4 2 6 5 6 8 0 5-5 7-11 7S5 27 5 22c0-3 2-6 6-8Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M11.5 21h.1m8.8 0h.1m-6 3 1.5 1 1.5-1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </span>
+        <span><strong>eBunny<span class="brand-dot">.</span></strong><small>Панель прокси</small></span>
+      </a>
+      <nav id="navigation" aria-label="Разделы панели"></nav>
+      <div class="sidebar-footer">
+        <span class="sidebar-pulse" aria-hidden="true"></span>
+        <div><strong>Локальная панель</strong><small>Черновики в браузере</small></div>
+      </div>
+    </aside>
+    <a class="mobile-brand" href="#overview">eBunny<span class="brand-dot">.</span></a>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <section id="login" class="login-screen">
+    <div class="panel login-card">
+      <span class="login-brand">eBunny<span class="brand-dot">.</span></span>
+      <h1>Вход в панель</h1>
+      <button class="button primary" type="button" disabled>Войти через Telegram</button>
+      <div class="login-flow" hidden>
+        <p>Открой бота и отправь ему код из этого окна.</p>
+        <strong aria-label="Код входа"></strong>
+        <a class="button" target="_blank" rel="noopener noreferrer">Открыть бота</a>
+      </div>
+      <p class="login-status" role="status"></p>
+    </div>
+  </section>
+  <dialog id="editor" aria-labelledby="dialog-title"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

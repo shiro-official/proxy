@@ -1,0 +1,25 @@
+[Unit]
+Description=eBunny control panel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ebunny-panel
+EnvironmentFile=/opt/ebunny-panel/.env
+Environment=PANEL_DATA_DIR=/var/lib/ebunny-panel
+Environment=PATH=/opt/ebunny-node24/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node /opt/ebunny-panel/server/index.js
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+StateDirectory=ebunny-panel
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
