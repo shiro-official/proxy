@@ -111,6 +111,7 @@ export function createPanel(config, { db, requestFetch = fetch, tcpProbe } = {})
       switch (route) {
         case 'GET /api/rollout': return json(response, 200, rollout.overview());
         case 'GET /api/rollout/dns': return json(response, 200, await rollout.dns());
+        case 'POST /api/rollout/grant': return json(response, 200, rollout.setGrantState(await jsonBody(request)));
         case 'POST /api/rollout/reserve': return json(response, 200, await rollout.reserve(await jsonBody(request)));
         case 'POST /api/rollout/refresh': return json(response, 200, await rollout.refresh(await jsonBody(request)));
         case 'POST /api/rollout/publish': return json(response, 200, await rollout.publish(await jsonBody(request)));

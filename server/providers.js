@@ -8,6 +8,8 @@ const operationsUrl = 'https://operation.api.cloud.yandex.net/operations';
 const dnsName = 'tg.ebunny.cloud';
 const safeId = (value) => typeof value === 'string' && /^[a-z0-9]{8,64}$/i.test(value);
 const yamlString = (value) => JSON.stringify(value);
+export const grantStates = ['available', 'exhausted', 'paused'];
+const oauthTokenValid = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{16,4000}$/.test(value);
 
 export function validateCloudConfig(value) {
   if (value == null) return { projects: [] };
@@ -19,14 +21,22 @@ export function validateCloudConfig(value) {
         !/^[a-z_][a-z0-9_-]{0,31}$/.test(project.sshUser ?? '') || project.sshUser === 'root' ||
         !/^ssh-ed25519 [A-Za-z0-9+/=]{60,120}(?: [^\r\n]{1,120})?$/.test(project.sshPublicKey ?? '') ||
         (project.name != null && (typeof project.name !== 'string' || project.name.length > 80)) ||
-        !safeId(project.key?.id) || !safeId(project.key?.service_account_id)) {
+        (project.priority != null && (!Number.isSafeInteger(project.priority) || project.priority < 1 || project.priority > 10000)) ||
+        (project.grantState != null && !grantStates.includes(project.grantState))) {
       throw new Error('Некорректные параметры одного из проектов Yandex Cloud.');
     }
-    try {
-      const privateKey = createPrivateKey(project.key.private_key.replace(/^PLEASE DO NOT REMOVE THIS LINE![^\n]*\r?\n/, ''));
-      if (privateKey.asymmetricKeyType !== 'rsa' || privateKey.asymmetricKeyDetails.modulusLength < 2048) throw new Error();
-    } catch {
-      throw new Error('Не удалось прочитать RSA-ключ сервисного аккаунта Yandex Cloud.');
+    if (project.oauthToken !== undefined) {
+      if (project.key !== undefined || !oauthTokenValid(project.oauthToken)) {
+        throw new Error('Для проекта Яндекса задай один способ входа: OAuth-токен либо ключ сервисного аккаунта.');
+      }
+    } else {
+      try {
+        if (!safeId(project.key?.id) || !safeId(project.key?.service_account_id)) throw new Error();
+        const privateKey = createPrivateKey(project.key.private_key.replace(/^PLEASE DO NOT REMOVE THIS LINE![^\n]*\r?\n/, ''));
+        if (privateKey.asymmetricKeyType !== 'rsa' || privateKey.asymmetricKeyDetails.modulusLength < 2048) throw new Error();
+      } catch {
+        throw new Error('Не удалось прочитать RSA-ключ сервисного аккаунта Yandex Cloud.');
+      }
     }
     keys.add(project.id);
   }
@@ -112,14 +122,23 @@ export function createProviders(config, requestFetch) {
     const existing = tokens.get(project.id);
     const now = Date.now();
     if (existing && existing.expires > now + 60_000) return existing.token;
-    const data = await api(requestFetch, 'Yandex IAM', iamUrl, { method: 'POST', body: { jwt: jwt(project.key, now) } });
+    const body = project.oauthToken
+      ? { yandexPassportOauthToken: project.oauthToken }
+      : { jwt: jwt(project.key, now) };
+    const data = await api(requestFetch, 'Yandex IAM', iamUrl, { method: 'POST', body });
     if (typeof data.iamToken !== 'string' || !data.iamToken) throw new ProviderError('Yandex IAM', null);
     tokens.set(project.id, { token: data.iamToken, expires: Date.parse(data.expiresAt) || now + 300_000 });
     return data.iamToken;
   }
 
   async function compute(project, url, options) {
-    return api(requestFetch, 'Yandex Compute', url, { ...options, token: await getToken(project) });
+    try {
+      return await api(requestFetch, 'Yandex Compute', url, { ...options, token: await getToken(project) });
+    } catch (error) {
+      if (!(error instanceof ProviderError) || error.upstreamStatus !== 401) throw error;
+      tokens.delete(project.id);
+      return api(requestFetch, 'Yandex Compute', url, { ...options, token: await getToken(project) });
+    }
   }
 
   async function getDns() {

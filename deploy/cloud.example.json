@@ -3,6 +3,8 @@
     {
       "id": "pilot",
       "name": "Проект Яндекса",
+      "priority": 10,
+      "grantState": "available",
       "folderId": "<FOLDER_ID>",
       "subnetId": "<SUBNET_ID>",
       "securityGroupId": "<SECURITY_GROUP_ID>",

@@ -9,6 +9,7 @@ const stateText = {
   failed: 'Ошибка ВМ',
   active: 'DNS переключён',
 };
+const grantText = { available: 'Доступен', exhausted: 'Грант закончился', paused: 'На паузе' };
 const time = new Intl.DateTimeFormat('ru-RU', {
   dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow',
 });
@@ -46,13 +47,30 @@ function candidateCard(row, dns, projects) {
   </article>`;
 }
 
-function page(data, dns, dnsError) {
-  return `<div class="panel-top"><div><h2>Резерв и перенос входа</h2><p>Yandex Cloud · Cloudflare</p></div></div>
-    ${!data.projects.length ? '<p class="notice">Подключи сервисный аккаунт Яндекса и параметры проекта на сервере панели.</p>' : `<form class="rollout-form" data-create>
-      <label>Проект Яндекса<select name="project" required>${data.projects.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)}</option>`).join('')}</select></label>
+function projectsSection(projects) {
+  if (!projects.length) return '<p class="notice">Подключи проект Яндекса через официальный OAuth или сервисный аккаунт.</p>';
+  const available = projects.filter(({ grantState }) => grantState === 'available');
+  return `<details class="rollout-projects"><summary>Проекты и состояние грантов</summary>
+    <p class="notice">Состояние указывается после проверки в Billing. Меньшее число — выше приоритет.</p>
+    ${projects.map((project) => `<form data-grant="${escape(project.id)}" class="rollout-project">
+      <div><strong>${escape(project.name)}</strong><p class="notice">Приоритет ${project.priority} · ${project.auth === 'oauth' ? 'OAuth' : 'Сервисный аккаунт'}${project.grantUpdated ? ` · ${time.format(project.grantUpdated)} МСК` : ''}</p></div>
+      <label>Состояние<select name="grant">${Object.entries(grantText).map(([state, label]) =>
+        `<option value="${state}"${state === project.grantState ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
+      <button class="button" type="submit">Сохранить состояние</button>
+    </form>`).join('')}</details>
+    ${available.length ? `<form class="rollout-form" data-create>
+      <label>Проект Яндекса<select name="project">
+        <option value="">По приоритету · ${escape(available[0].name)}</option>
+        ${available.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)}</option>`).join('')}
+      </select></label>
       <label class="bs-checkbox"><input type="checkbox" required> Подтверждаю создание платной ВМ по профилю, указанному выше.</label>
       <button class="button primary" type="submit">Создать резервную ВМ</button>
-    </form>`}
+    </form>` : '<p class="notice">Нет доступного проекта для создания ВМ.</p>'}`;
+}
+
+function page(data, dns, dnsError) {
+  return `<div class="panel-top"><div><h2>Резерв и перенос входа</h2><p>Yandex Cloud · Cloudflare</p></div></div>
+    ${projectsSection(data.projects)}
     ${data.cloudflare ? `<div class="rollout-dns"><span>Cloudflare · текущее значение A-записи</span><strong class="mono">${escape(dns?.ip ?? '—')}</strong><button class="button" type="button" data-reload>Обновить DNS</button></div>` :
       '<p class="notice">Для переключения DNS подключи токен Cloudflare с правом редактирования этой зоны.</p>'}
     ${dnsError ? `<p class="notice">${escape(dnsError)}</p>` : ''}
@@ -108,8 +126,17 @@ export async function mountRollout(root, message = '') {
       event.preventDefault();
       void run(async () => {
         requestId ??= crypto.randomUUID();
-        const row = await api('/reserve', { requestId, project: create.elements.project.value, confirmCost: true });
+        const row = await api('/reserve', { requestId, project: create.elements.project.value || null, confirmCost: true });
         await mountRollout(root, row.state === 'pending' ? 'Запрос на создание принят. Обнови статус ВМ.' : stateText[row.state]);
+      });
+    };
+  }
+  for (const form of root.querySelectorAll('[data-grant]')) {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      void run(async () => {
+        await api('/grant', { project: form.dataset.grant, state: form.elements.grant.value });
+        await mountRollout(root, 'Состояние проекта сохранено.');
       });
     };
   }

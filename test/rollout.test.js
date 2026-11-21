@@ -100,3 +100,49 @@ test('manual rollout creates one reserve and switches the existing DNS record on
   assert.equal(controls.overview().candidates[0].state, 'active');
   assert.doesNotMatch(JSON.stringify(controls.overview()), /PRIVATE KEY|test-token/);
 });
+
+test('uses official user OAuth and skips projects marked exhausted when choosing by priority', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  const project = {
+    folderId: 'folder123', subnetId: 'subnet123', securityGroupId: 'security123', imageId: 'image1234',
+    sshUser: 'bunny', sshPublicKey: `ssh-ed25519 ${'A'.repeat(68)} testing`,
+  };
+  const firstToken = 'test-oauth-token-primary-123';
+  const spareToken = 'test-oauth-token-secondary-456';
+  const first = { ...project, id: 'primary', priority: 10, oauthToken: firstToken };
+  const spare = { ...project, id: 'backup', priority: 20, folderId: 'folder222', oauthToken: spareToken };
+  const config = validateCloudConfig({ projects: [spare, first] });
+  assert.throws(() => validateCloudConfig({ projects: [{ ...first, oauthToken: 'not:a:bearer' }] }), /OAuth/);
+  assert.throws(() => validateCloudConfig({ projects: [{ ...first, key: {} }] }), /один способ входа/);
+  const sent = [];
+  const rollout = createRollout(db, config, async (url, init) => {
+    const host = new URL(url).hostname;
+    const body = JSON.parse(init.body);
+    sent.push(host);
+    if (host === 'iam.api.cloud.yandex.net') {
+      assert.deepEqual(body, { yandexPassportOauthToken: spareToken });
+      return Response.json({ iamToken: 'short-lived-token' });
+    }
+    assert.equal(host, 'compute.api.cloud.yandex.net');
+    assert.equal(init.headers.Authorization, 'Bearer short-lived-token');
+    assert.equal(body.folderId, spare.folderId);
+    assert(!JSON.stringify(body).includes(spareToken));
+    return Response.json({ id: 'operation2' });
+  });
+
+  assert.deepEqual(rollout.overview().projects.map(({ id, auth }) => [id, auth]), [['primary', 'oauth'], ['backup', 'oauth']]);
+  rollout.setGrantState({ project: 'primary', state: 'exhausted' });
+  await assert.rejects(rollout.reserve({ project: 'primary', requestId: randomUUID(), confirmCost: true }), /нет доступного проекта/i);
+  const request = { project: null, requestId: randomUUID(), confirmCost: true };
+  const created = await rollout.reserve(request);
+  assert.equal(created.project, 'backup');
+  assert.equal(created.state, 'pending');
+  rollout.setGrantState({ project: 'backup', state: 'paused' });
+  assert.equal((await rollout.reserve(request)).id, created.id);
+  await assert.rejects(rollout.reserve({ ...request, requestId: randomUUID() }), /нет доступного проекта/i);
+  assert.deepEqual(sent, ['iam.api.cloud.yandex.net', 'compute.api.cloud.yandex.net']);
+  const publicState = JSON.stringify(rollout.overview());
+  assert(!publicState.includes(firstToken));
+  assert(!publicState.includes(spareToken));
+});

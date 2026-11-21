@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { connect, isIPv4 } from 'node:net';
 import { RequestError } from './auth.js';
-import { createProviders, providerId, rejectedRequest } from './providers.js';
+import { createProviders, grantStates, providerId, rejectedRequest } from './providers.js';
 
 function probeTcp(ip) {
   return new Promise((resolve) => {
@@ -19,7 +19,9 @@ function probeTcp(ip) {
 
 export function createRollout(db, config, requestFetch, tcp = probeTcp) {
   const providers = createProviders(config, requestFetch);
-  const projects = new Map(config.projects.map((project) => [project.id, project]));
+  const projects = new Map(config.projects.map((project, index) => [project.id, {
+    ...project, priority: project.priority ?? (index + 1) * 10,
+  }]));
   db.exec(`
     CREATE TABLE IF NOT EXISTS ingress_candidates (
       id TEXT PRIMARY KEY, project TEXT NOT NULL, name TEXT UNIQUE NOT NULL, created INTEGER NOT NULL,
@@ -27,11 +29,17 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS pending_ingress_per_project ON ingress_candidates(project)
       WHERE state IN ('creating', 'pending', 'uncertain', 'prepared');
+    CREATE TABLE IF NOT EXISTS cloud_grant_state (
+      project TEXT PRIMARY KEY, state TEXT NOT NULL, updated INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS dns_rollouts (
       id TEXT PRIMARY KEY, candidate TEXT NOT NULL, created INTEGER NOT NULL,
       previous_ip TEXT NOT NULL, target_ip TEXT NOT NULL, state TEXT NOT NULL, message TEXT
     );
   `);
+  const grantFor = db.prepare('SELECT state, updated FROM cloud_grant_state WHERE project = ?');
+  const grantState = (project) => grantFor.get(project.id)?.state ?? project.grantState ?? 'available';
+  const orderedProjects = [...projects.values()].sort((left, right) => left.priority - right.priority);
   const rowFor = db.prepare('SELECT * FROM ingress_candidates WHERE id = ?');
   const update = db.prepare('UPDATE ingress_candidates SET state = ?, message = ? WHERE id = ?');
   let switching = false;
@@ -66,30 +74,52 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
   const rollout = {
     overview() {
       return {
-        projects: [...projects.values()].map(({ id, name }) => ({ id, name: name || id })),
+        projects: orderedProjects.map((project) => ({
+          id: project.id,
+          name: project.name || project.id,
+          priority: project.priority,
+          auth: project.oauthToken ? 'oauth' : 'service-account',
+          grantState: grantState(project),
+          grantUpdated: grantFor.get(project.id)?.updated ?? null,
+        })),
         cloudflare: !!config.cloudflare,
         candidates: db.prepare('SELECT * FROM ingress_candidates ORDER BY created DESC LIMIT 50').all(),
         switches: db.prepare('SELECT * FROM dns_rollouts ORDER BY created DESC LIMIT 10').all(),
       };
     },
     dns: providers.dns,
+    setGrantState(body) {
+      const project = projectFor(body?.project);
+      if (!grantStates.includes(body?.state)) throw new RequestError(400, 'Неизвестное состояние проекта.');
+      db.prepare('INSERT OR REPLACE INTO cloud_grant_state VALUES (?, ?, ?)').run(project.id, body.state, Date.now());
+      return { state: body.state };
+    },
     async reserve(body) {
       if (body?.confirmCost !== true || typeof body.requestId !== 'string' ||
           !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(body.requestId)) {
         throw new RequestError(400, 'Подтверди создание платной ВМ.');
       }
-      const project = projectFor(body.project);
       const id = body.requestId;
-      const prior = rowFor.get(id);
-      if (prior) {
-        if (prior.project !== project.id) throw new RequestError(409, 'Идентификатор уже использован для другого проекта.');
-        return prior;
+      const preferred = body.project === null;
+      const matchingOperation = () => {
+        const row = rowFor.get(id);
+        if (row && !preferred && row.project !== body.project) {
+          throw new RequestError(409, 'Идентификатор уже использован для другого проекта.');
+        }
+        return row;
+      };
+      const prior = matchingOperation();
+      if (prior) return prior;
+      const project = preferred
+        ? orderedProjects.find((item) => grantState(item) === 'available') : projectFor(body.project);
+      if (!project || grantState(project) !== 'available') {
+        throw new RequestError(409, 'Нет доступного проекта. Сверь состояние в Billing.');
       }
       await providers.prepareProject(project);
-      const concurrent = rowFor.get(id);
-      if (concurrent) {
-        if (concurrent.project !== project.id) throw new RequestError(409, 'Идентификатор уже использован для другого проекта.');
-        return concurrent;
+      const concurrent = matchingOperation();
+      if (concurrent) return concurrent;
+      if (grantState(project) !== 'available') {
+        throw new RequestError(409, 'Проект сменил статус. Обнови данные перед созданием ВМ.');
       }
       if (db.prepare("SELECT 1 FROM ingress_candidates WHERE project = ? AND state IN ('creating', 'pending', 'uncertain', 'prepared')").get(project.id)) {
         throw new RequestError(409, 'В этом проекте уже есть резерв или незавершённая операция.');
