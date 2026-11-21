@@ -72,13 +72,30 @@ export function validateCloudConfig(value) {
 }
 
 class ProviderError extends RequestError {
-  constructor(provider, upstreamStatus, code, requestId) {
-    super(502, `${provider}: ${upstreamStatus ? `HTTP ${upstreamStatus}` : 'ответ не получен'}${code ? ` (${code})` : ''}.${requestId ? ` ID запроса: ${requestId}.` : ''}`);
+  constructor(provider, upstreamStatus, code, requestId, hint) {
+    super(502, `${provider}: ${upstreamStatus ? `HTTP ${upstreamStatus}` : 'ответ не получен'}${code ? ` (${code})` : ''}.${requestId ? ` ID запроса: ${requestId}.` : ''}${hint ? ` ${hint}` : ''}`);
     this.upstreamStatus = upstreamStatus;
+    this.provider = provider;
+    this.code = code;
   }
 }
 
 const asCode = (value) => /^[A-Za-z0-9_.-]{1,48}$/.test(String(value ?? '')) ? String(value) : null;
+
+const exhaustedCode = (code) => ['8', 'RESOURCE_EXHAUSTED'].includes(String(code));
+export const isComputeExhaustion = (message) => /^Yandex Compute: (?:HTTP 429 \((?:8|RESOURCE_EXHAUSTED)\)|RESOURCE_EXHAUSTED \(8\))\./.test(message ?? '');
+
+function quotaHint(error) {
+  const text = JSON.stringify({ message: error?.message, details: error?.details }).slice(0, 20_000);
+  const keys = [...new Set(text.match(/(?:compute\.(?:instanceCores\.count|instanceMemory\.size|ssdDisks\.size)(?:\.ru-central1-[a-z])?|compute\.(?:instances|disks)\.count|vpc\.external(?:Static)?Addresses\.count)(?![a-zA-Z0-9_.-])/g))];
+  return keys.length ? `Квота: ${keys.join(', ')}.` : '';
+}
+
+export function operationFailure(error) {
+  if (String(error.code) === '7') return 'Yandex Compute: PERMISSION_DENIED (7).';
+  if (exhaustedCode(error.code)) return ['Yandex Compute: RESOURCE_EXHAUSTED (8).', quotaHint(error)].filter(Boolean).join(' ');
+  return 'Yandex Cloud завершил создание ВМ с ошибкой.';
+}
 
 async function api(requestFetch, provider, url, { method = 'GET', body, token } = {}) {
   const headers = {};
@@ -92,7 +109,9 @@ async function api(requestFetch, provider, url, { method = 'GET', body, token } 
   if (!response.ok || !data || data.success === false) {
     const trace = (response.headers.get('x-request-id') ?? response.headers.get('x-server-trace-id') ?? '').trim();
     const requestId = /^[A-Za-z0-9._-]{6,120}$/.test(trace) ? trace : null;
-    throw new ProviderError(provider, response.status, asCode(data?.errors?.[0]?.code ?? data?.code), requestId);
+    const code = asCode(data?.errors?.[0]?.code ?? data?.code);
+    const hint = provider === 'Yandex Compute' && response.status === 429 && exhaustedCode(code) ? quotaHint(data) : '';
+    throw new ProviderError(provider, response.status, code, requestId, hint);
   }
   return data;
 }
@@ -270,4 +289,5 @@ export function createProviders(config, requestFetch) {
 
 export const providerId = safeId;
 export const rejectedRequest = (error) => error instanceof ProviderError &&
-  [400, 401, 403, 404, 422].includes(error.upstreamStatus);
+  ([400, 401, 403, 404, 422].includes(error.upstreamStatus) ||
+    (error.provider === 'Yandex Compute' && error.upstreamStatus === 429 && exhaustedCode(error.code)));

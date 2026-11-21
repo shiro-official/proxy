@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { connect, isIPv4 } from 'node:net';
 import { RequestError } from './auth.js';
-import { createProviders, grantStates, providerId, rejectedRequest } from './providers.js';
+import { createProviders, grantStates, isComputeExhaustion, operationFailure, providerId, rejectedRequest } from './providers.js';
 
 function probeTcp(ip) {
   return new Promise((resolve) => {
@@ -239,10 +239,7 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
         if (row.operation_id) {
           const op = await providers.operation(project, row.operation_id);
           if (op.error) {
-            const message = String(op.error.code) === '7'
-              ? 'Yandex Compute: PERMISSION_DENIED (7).'
-              : 'Yandex Cloud завершил создание ВМ с ошибкой.';
-            update.run('failed', message, row.id);
+            update.run('failed', operationFailure(op.error), row.id);
             return rowFor.get(row.id);
           }
           if (!op.done) return row;
@@ -250,7 +247,12 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
           if (providerId(instanceId)) return ingestInstance(row, await providers.instance(project, instanceId));
         }
         const instance = row.instance_id ? await providers.instance(project, row.instance_id) : await providers.find(project, row.name);
-        return instance ? ingestInstance(row, instance) : row;
+        if (instance) return ingestInstance(row, instance);
+        if (row.state === 'uncertain' && !row.operation_id && !row.instance_id && isComputeExhaustion(row.message)) {
+          update.run('failed', row.message, row.id);
+          return rowFor.get(row.id);
+        }
+        return row;
       } finally {
         refreshing.delete(row.id);
       }

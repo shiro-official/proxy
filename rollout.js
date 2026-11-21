@@ -30,6 +30,7 @@ async function api(path = '', body) {
 function candidateCard(row, dns, projects) {
   const canRefresh = !['active', 'failed'].includes(row.state);
   const canPublish = row.state === 'prepared' && row.ip && dns?.ip;
+  const exhausted = /^Yandex Compute: (?:HTTP 429|RESOURCE_EXHAUSTED)/.test(row.message ?? '');
   const permissionDenied = row.state === 'failed' &&
     /^Yandex Compute: (HTTP 403|PERMISSION_DENIED)/.test(row.message ?? '');
   return `<article class="rollout-candidate">
@@ -40,6 +41,8 @@ function candidateCard(row, dns, projects) {
     ${row.message ? `<p class="notice">${escape(row.message)}</p>` : ''}
     ${permissionDenied ? `<p class="notice">Для ВМ с публичным IPv4 проверь роли <code>compute.editor</code> и <code>vpc.publicAdmin</code> у сервисного аккаунта в каталоге.
       <a class="text-link" href="https://yandex.cloud/ru/docs/compute/security/#choosing-roles" target="_blank" rel="noopener noreferrer">Роли в документации Яндекса</a></p>` : ''}
+    ${exhausted ? `<p class="notice">Яндекс ограничил запрос. Проверь свободные vCPU и SSD в ru-central1-d и квоту публичных IPv4.
+      <a class="text-link" href="https://yandex.cloud/ru/docs/compute/concepts/limits#compute-quotas" target="_blank" rel="noopener noreferrer">Квоты Compute Cloud</a></p>` : ''}
     ${row.state === 'prepared' ? '<p class="notice">Настрой WireGuard и Telemt на резерве и проверь подключение по его адресу.</p>' : ''}
     ${row.state === 'uncertain' ? '<p class="notice">Обновление статуса проверяет уже отправленную операцию.</p>' : ''}
     ${canRefresh ? `<button class="button" type="button" data-refresh="${escape(row.id)}">Обновить статус ВМ</button>` : ''}

@@ -213,7 +213,9 @@ test('discovers resources with one identity, imports a project and only creates 
       assert.equal(body.networkInterfaceSpecs[0].subnetId, 'subnet123');
       assert.equal(body.bootDiskSpec.diskSpec.imageId, 'image1234');
       assert(!JSON.stringify(body).includes(sharedToken));
-      return fail ? Response.json({ code: 8 }, { status: 429 }) : Response.json({ id: 'operation1' });
+      return fail ? Response.json({
+        code: 8, message: 'Quota compute.instanceCores.count.ru-central1-d exceeded. Sensitive diagnostic text.',
+      }, { status: 429 }) : Response.json({ id: 'operation1' });
     }
     assert.fail(`Unexpected request: ${url}`);
   });
@@ -244,6 +246,46 @@ test('discovers resources with one identity, imports a project and only creates 
   await controls.replenish(now + 20 * 60_000);
   assert.equal(writes, 2);
   assert.equal(controls.overview().automation.enabled, false);
+  const declined = controls.overview().candidates.find(({ state }) => state === 'failed');
+  assert.match(declined.message, /HTTP 429 \(8\).*compute\.instanceCores\.count\.ru-central1-d/);
+  assert.doesNotMatch(declined.message, /Sensitive diagnostic text/);
   await controls.replenish(now + 40 * 60_000);
   assert.equal(writes, 2);
+});
+
+test('reconciles older explicit quota rejections after a successful lookup and preserves other uncertain operations', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  const project = {
+    id: 'pilot', oauthToken: 'test-oauth-token-primary-123', folderId: 'folder123',
+    subnetId: 'subnet123', securityGroupId: 'security123', imageId: 'image1234',
+    sshUser: 'bunny', sshPublicKey: `ssh-ed25519 ${'A'.repeat(68)} testing`,
+  };
+  let available = false;
+  let instance;
+  const controls = createRollout(db, validateCloudConfig({ projects: [project] }), async (url, init) => {
+    const { hostname } = new URL(url);
+    if (hostname === 'iam.api.cloud.yandex.net') return Response.json({ iamToken: 'test-token' });
+    assert.equal(hostname, 'compute.api.cloud.yandex.net');
+    assert.equal(init.method, 'GET');
+    assert.equal(new URL(url).searchParams.get('folderId'), project.folderId);
+    if (!available) return Response.json({ code: 8 }, { status: 429 });
+    return Response.json({ instances: instance ? [instance] : [] });
+  });
+  const write = db.prepare("INSERT INTO ingress_candidates VALUES (?, ?, ?, ?, 'uncertain', NULL, NULL, NULL, ?)");
+  const quota = 'Yandex Compute: HTTP 429 (8).';
+  write.run('old', project.id, 'ebunny-quota-old', 1, quota);
+  await assert.rejects(controls.refresh({ id: 'old' }), /HTTP 429/);
+  assert.equal(controls.overview().candidates[0].state, 'uncertain');
+  available = true;
+  assert.equal((await controls.refresh({ id: 'old' })).state, 'failed');
+  write.run('unknown', project.id, 'ebunny-unknown', 2, 'Yandex Compute: ответ не получен.');
+  assert.equal((await controls.refresh({ id: 'unknown' })).state, 'uncertain');
+  db.prepare("UPDATE ingress_candidates SET state = 'failed' WHERE id = 'unknown'").run();
+  write.run('found', project.id, 'ebunny-found', 3, quota);
+  instance = {
+    id: 'instance1', name: 'ebunny-found', labels: { 'ebunny-role': 'ingress-candidate' }, status: 'RUNNING',
+    networkInterfaces: [{ primaryV4Address: { oneToOneNat: { address: '192.0.2.111' } } }],
+  };
+  assert.equal((await controls.refresh({ id: 'found' })).state, 'prepared');
 });
