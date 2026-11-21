@@ -8,6 +8,7 @@ import { createPanel } from '../server/index.js';
 const ownerId = '123456';
 const masterKey = Buffer.alloc(32, 15);
 const bsKey = 'bsk_live_test_only_key';
+const telemetryKey = 'e'.repeat(64);
 const audienceKey = 'a'.repeat(64);
 const operator = 'mts|цфо|off';
 
@@ -19,7 +20,7 @@ test('Telegram login and BSCheck stay owner-only, paid runs are idempotent and r
   let paidCalls = 0;
   let failOnce = false;
   const seenIds = [];
-  const config = { origin: 'http://127.0.0.1', ownerId, masterKey, audienceKey, botName: 'DemoPanelBot', botToken: '1:mock' };
+  const config = { origin: 'http://127.0.0.1', ownerId, masterKey, audienceKey, telemetryKey, botName: 'DemoPanelBot', botToken: '1:mock' };
   const requestFetch = async (url, init) => {
     const path = new URL(url).pathname;
     if (url.startsWith('https://api.telegram.org/')) {
@@ -70,6 +71,9 @@ test('Telegram login and BSCheck stay owner-only, paid runs are idempotent and r
   assert.deepEqual(webhook, { url: `${origin}/api/telegram/webhook`, secret_token: webhookSecret, allowed_updates: ['message'] });
   assert.equal((await request('/api/bscheck')).status, 401);
   assert.equal((await request('/api/audience')).status, 401);
+  assert.equal((await request('/api/telemetry')).status, 401);
+  assert.equal((await post('/api/telemetry/sample', { telemt: true })).status, 403);
+  assert.equal((await post('/api/telemetry/sample', { telemt: true, connections: 42 }, { Authorization: `Bearer ${telemetryKey}` })).status, 200);
   assert.match(await (await request('/')).text(), /data-runtime="server"/);
   assert.equal((await request('/app.js')).status, 401);
   assert.equal((await request('/.panel-data/ebunny.sqlite')).status, 404);
@@ -91,6 +95,7 @@ test('Telegram login and BSCheck stay owner-only, paid runs are idempotent and r
   assert.equal((await completion.json()).state, 'authorized');
   cookie = completion.headers.getSetCookie()[1].split(';')[0];
   assert.equal((await request('/app.js')).status, 200);
+  assert.equal((await (await request('/api/telemetry?period=7d')).json()).connections, 42);
   const publishStart = (body, bearer = audienceKey) => post('/api/audience/start', body, { Authorization: `Bearer ${bearer}` });
   const event = { update_id: '101', telegram_id: '76543210' };
   assert.equal((await publishStart(event, 'bad')).status, 403);

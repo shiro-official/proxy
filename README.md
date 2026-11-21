@@ -28,7 +28,7 @@ Ubuntu 24.04 LTS, Intel Ice Lake Shared-core, 2 vCPU с гарантирован
 4. На bsbord.com откройте **API** в левом меню и выпустите ключ `bsk_live_…`. После входа в панель вставьте его в **Проверки → API-ключ BSCheck**. Панель никогда не возвращает сохранённый ключ в браузер.
 5. Укажите публичный IPv4 входной ВМ, выберите сети и сохраните настройки. «Оценить стоимость» не запускает платную пробу. Разовую проверку оплачивает отдельная кнопка с подтверждённой оценкой. Для расписания раз в 6 минут включите его вручную и укажите дневной бюджет в кредитах. При замене ключа расписание ставится на паузу. Данные и история сохраняются в SQLite.
 
-В серверном обзоре метрики прокси пока демонстрационные. В панели используются `@eBunnyVPN` для канала и `@eBunnyAPP` для бота.
+В серверном обзоре отображаются реальные замеры с входной ВМ после подключения сборщика телеметрии. В панели используются `@eBunnyVPN` для канала и `@eBunnyAPP` для бота.
 
 ### Установка как служба на Ubuntu
 
@@ -82,3 +82,57 @@ sudo /opt/ebunny-node24/bin/node --env-file=/opt/ebunny-panel/.env \
 ### Подсчёт запусков @eBunnyAPP
 
 Укажите отдельный случайный `AUDIENCE_INGEST_KEY` из `openssl rand -hex 32` и передайте его процессу @eBunnyAPP через секреты. В существующем обработчике команды `/start mtproxy` отправляйте событие в `POST /api/audience/start` с заголовком `Authorization: Bearer <AUDIENCE_INGEST_KEY>` и JSON `{"update_id":"123","telegram_id":"456"}`. Подставляйте значения из принятого обновления Telegram. При повторной доставке обновления используйте тот же `update_id`. Панель хранит псевдоним аккаунта и считает запуски и уникальные аккаунты за 7 или 30 дней. Регистрация webhook бота входа не меняет настройки @eBunnyAPP.
+
+### Реальные метрики Telemt и WireGuard
+
+Сборщик работает на **входной ВМ Яндекса**. Он каждую минуту читает Telemt через `127.0.0.1:9090` и измеряет задержку до пира WireGuard. Панель принимает агрегированные значения через HTTPS. Метрики и имена пользователей Telemt не публикуются в сети.
+
+**На VPS с панелью**
+
+```sh
+cd /opt/ebunny-panel
+sudo git pull --ff-only origin panel
+sudo sh -c 'grep -q "^TELEMETRY_INGEST_KEY=." .env || { sed -i "/^TELEMETRY_INGEST_KEY=/d" .env && printf "TELEMETRY_INGEST_KEY=%s\n" "$(openssl rand -hex 32)" >> .env; }'
+sudo systemctl restart ebunny-panel
+curl -fsS --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:4180/api/session
+```
+
+Передайте значение `TELEMETRY_INGEST_KEY` с VPS панели на входную ВМ через свои SSH-сеансы. Ключ должен совпадать на обоих серверах.
+
+**На входной ВМ Яндекса**
+
+Убедитесь, что локальный порт 9090 свободен: `sudo ss -lntp '( sport = :9090 )'`. В существующую секцию `[server]` файла `/etc/telemt/telemt.toml` добавьте эти параметры (если они уже есть, отредактируйте их):
+
+```toml
+metrics_listen = "127.0.0.1:9090"
+metrics_whitelist = ["127.0.0.1/32"]
+```
+
+Telemt потребуется один перезапуск. Активные подключения на это время прервутся.
+
+```sh
+sudo systemctl restart telemt
+curl -fsS --retry 5 --retry-connrefused --retry-delay 1 http://127.0.0.1:9090/metrics \
+  | awk '/^telemt_uptime_seconds / {print; found=1} END {exit !found}'
+```
+
+Установите сборщик. Команды предполагают первую установку.
+
+```sh
+sudo apt-get install -y git python3 iputils-ping
+sudo git clone --branch panel --single-branch https://github.com/shiro-official/proxy.git /opt/ebunny-telemetry
+sudo sh -c 'test -f /etc/ebunny-telemetry.env || install -m 0600 /opt/ebunny-telemetry/deploy/telemetry.env.example /etc/ebunny-telemetry.env'
+sudoedit /etc/ebunny-telemetry.env
+```
+
+Укажите `TELEMETRY_INGEST_KEY`. При желании укажите публичные IPv4 входа и EU-выхода в `INGRESS_PUBLIC_IP` и `EXIT_PUBLIC_IP`. Параметры `wg-ebunny` и `10.77.0.1` соответствуют пилоту.
+
+```sh
+sudo install -m 0644 /opt/ebunny-telemetry/deploy/ebunny-telemetry.service /opt/ebunny-telemetry/deploy/ebunny-telemetry.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start ebunny-telemetry.service
+sudo systemctl enable --now ebunny-telemetry.timer
+sudo journalctl -u ebunny-telemetry -n 10 --no-pager
+```
+
+Ожидаемый результат — «Замер передан панели». Обзор автоматически обновляется каждые 30 секунд. Трафик считается по разнице последовательных счётчиков Telemt и появляется после второго замера. Панель показывает длительность измеренных интервалов. После перезапуска Telemt или пропуска замера история сохраняется, а неполные интервалы не учитываются. Пинг WireGuard показывает доступность пира внутри туннеля.

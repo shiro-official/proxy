@@ -1,0 +1,17 @@
+[Unit]
+Description=Send private proxy measurements to eBunny
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ebunny-telemetry.env
+ExecStart=/usr/bin/python3 /opt/ebunny-telemetry/deploy/collect-telemetry.py
+TimeoutStartSec=25s
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW

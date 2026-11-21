@@ -266,3 +266,8 @@ form input::placeholder { color: #817d90; }
 .bs-history-title { margin: 15px 0 7px; font-size: 14px; }
 .bscheck .form-error { margin-top: 12px; }
 button:disabled { opacity: .6; cursor: wait; }
+
+#overview-data { display: grid; gap: 18px; }
+@media (max-width: 640px) {
+  #overview-data { gap: 12px; }
+}

@@ -7,6 +7,7 @@ import { createAuth, RequestError } from './auth.js';
 import { createBscheck } from './bscheck.js';
 import { readConfig } from './config.js';
 import { createAudience } from './audience.js';
+import { createTelemetry } from './telemetry.js';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8', true]],
@@ -54,6 +55,7 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
   const auth = createAuth(db, config, requestFetch);
   const bs = createBscheck(db, config.masterKey, requestFetch);
   const audience = createAudience(db, config);
+  const telemetry = createTelemetry(db, config.telemetryKey);
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -67,6 +69,10 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
         if (!auth.isTelegram(request)) throw new RequestError(403, 'Доступ запрещён.');
         await auth.onTelegram(await jsonBody(request));
         return json(response, 200, { ok: true });
+      }
+      if (route === 'POST /api/telemetry/sample') {
+        if (!telemetry.accepts(request)) throw new RequestError(403, 'Доступ запрещён.');
+        return json(response, 200, telemetry.record(await jsonBody(request)));
       }
       if (route === 'POST /api/audience/start') {
         if (!audience.accepts(request)) throw new RequestError(403, 'Доступ запрещён.');
@@ -100,6 +106,7 @@ export function createPanel(config, { db, requestFetch = fetch } = {}) {
       if (!path.startsWith('/api/')) throw new RequestError(404, 'Страница не найдена.');
       if (!auth.session(request)) throw new RequestError(401, 'Сессия истекла. Войди через Telegram.');
       switch (route) {
+        case 'GET /api/telemetry': return json(response, 200, telemetry.report(new URL(request.url, config.origin).searchParams.get('period') ?? undefined));
         case 'GET /api/audience': return json(response, 200, audience.report());
         case 'GET /api/bscheck': return json(response, 200, bs.summary());
         case 'GET /api/bscheck/account': return json(response, 200, await bs.account());

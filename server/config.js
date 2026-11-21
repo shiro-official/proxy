@@ -15,7 +15,11 @@ export function readConfig(env = process.env) {
   if (env.AUDIENCE_INGEST_KEY && !/^[a-f\d]{64}$/i.test(env.AUDIENCE_INGEST_KEY)) {
     throw new Error('AUDIENCE_INGEST_KEY должен содержать 64 hex-символа.');
   }
+  if (env.TELEMETRY_INGEST_KEY && !/^[a-f\d]{64}$/i.test(env.TELEMETRY_INGEST_KEY)) {
+    throw new Error('TELEMETRY_INGEST_KEY должен содержать 64 hex-символа.');
+  }
   return {
+    telemetryKey: env.TELEMETRY_INGEST_KEY,
     audienceKey: env.AUDIENCE_INGEST_KEY,
     origin: origin.origin,
     ownerId: env.TELEGRAM_OWNER_ID,

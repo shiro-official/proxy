@@ -29,8 +29,14 @@ const sections = {
 };
 const domain = 'tg.ebunny.cloud';
 const demo = document.body.dataset.mode !== 'live';
-const entranceIp = demo ? '192.0.2.10' : '—';
-const exitIp = demo ? '198.51.100.10' : '—';
+const entranceIp = () => demo ? '192.0.2.10' : escapeText(telemetry?.ingressIp ?? '—');
+const exitIp = () => demo ? '198.51.100.10' : escapeText(telemetry?.exitIp ?? '—');
+const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+const sampleTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow' });
+let telemetry;
+let telemetryError = false;
+let pollTelemetry;
+let reportRequest;
 const storageKey = 'ebunny-panel-v1';
 function loadState() {
   try {
@@ -67,22 +73,51 @@ const samples = {
   },
 };
 
+const periods = { '24ч': '24h', '7д': '7d', '30д': '30d' };
+
 function chart() {
-  const { labels, values } = samples[period];
   const width = 640;
   const height = 158;
-  const points = values.map((value, index) => [index * width / (values.length - 1), height - value * height / 100]);
-  const line = points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+  const live = telemetry?.chart;
+  const points = demo
+    ? samples[period].values.map((value, index, values) => ({ value: Math.round(value * 1.5), at: index / (values.length - 1), bucket: index }))
+    : (live?.points ?? []).map((point) => ({ ...point, at: (point.at - live.from) / (live.to - live.from) }));
+  const max = points.reduce((highest, point) => Math.max(highest, point.value), 0);
+  const step = demo ? 50 : Math.max(1, Math.ceil(max / 3));
+  const scale = [3, 2, 1, 0].map((item) => item * step);
+  const labels = demo ? samples[period].labels : live?.points.length ? chartTimes(live) : [];
+  const segments = [];
+  let previous = -2;
+  for (const point of points) {
+    const x = 4 + point.at * (width - 8);
+    const y = 4 + (1 - point.value / scale[0]) * (height - 8);
+    if (point.bucket !== previous + 1) segments.push([]);
+    segments.at(-1).push([x.toFixed(1), y.toFixed(1)]);
+    previous = point.bucket;
+  }
+  const plotted = segments.map((segment) => {
+    const [firstX, firstY] = segment[0];
+    if (segment.length === 1) return `<ellipse cx="${firstX}" cy="${firstY}" rx="3" ry="3" fill="#c7f970"/>`;
+    const line = segment.map(([x, y]) => `${x},${y}`).join(' ');
+    return `<polygon points="${firstX},${height - 4} ${line} ${segment.at(-1)[0]},${height - 4}" fill="url(#chart-fill)"/>
+      <polyline points="${line}" fill="none" stroke="#c7f970" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  }).join('');
   return `<section class="panel chart-panel" aria-labelledby="chart-title">
-    <div class="panel-top"><div><h2 id="chart-title">Нагрузка прокси</h2><p>Активные соединения</p></div>
-    <div class="segments" role="group" aria-label="Период графика">${Object.keys(samples).map((item) => `<button type="button" data-period="${item}" aria-pressed="${item === period}">${item}</button>`).join('')}</div></div>
-    <div class="chart"><div class="chart-scale" aria-hidden="true"><span>150</span><span>100</span><span>50</span><span>0</span></div>
-    <div class="chart-body"><svg class="chart-plot" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Демонстрационный график нагрузки за период ${period}. Соединения растут к концу периода.">
+    <div class="panel-top"><div><h2 id="chart-title">Нагрузка прокси</h2><p>${demo ? 'Активные соединения' : 'Пиковое число одновременных соединений'}</p></div>
+    <div class="segments" role="group" aria-label="Период графика">${Object.keys(periods).map((item) => `<button type="button" data-period="${item}" aria-pressed="${item === period}">${item}</button>`).join('')}</div></div>
+    ${points.length ? `<div class="chart"><div class="chart-scale" aria-hidden="true">${scale.map((value) => `<span>${value}</span>`).join('')}</div>
+    <div class="chart-body"><svg class="chart-plot" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${demo ? 'Демонстрационный график нагрузки' : 'График активных соединений'} за период ${period}">
       <defs><linearGradient id="chart-fill" x2="0" y2="1"><stop stop-color="#c7f970" stop-opacity=".25"/><stop offset="1" stop-color="#c7f970" stop-opacity=".015"/></linearGradient></defs>
-      ${[1, 53, 105, 157].map((y) => `<path d="M0 ${y}H640" stroke="#2c2b35" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/>`).join('')}
-      <polygon points="0,${height} ${line} ${width},${height}" fill="url(#chart-fill)"/>
-      <polyline points="${line}" fill="none" stroke="#c7f970" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
-    </svg><div class="chart-labels" aria-hidden="true">${labels.map((label) => `<span>${label}</span>`).join('')}</div></div></div></section>`;
+      ${[4, 54, 104, 154].map((y) => `<path d="M0 ${y}H640" stroke="#2c2b35" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/>`).join('')}
+      ${plotted}
+    </svg><div class="chart-labels" aria-hidden="true">${labels.map((label) => `<span>${label}</span>`).join('')}</div></div></div>`
+    : emptyState('activity', 'Нет замеров за этот период', 'График появится после первого замера Telemt.')}</section>`;
+}
+
+function chartTimes({ from, to }) {
+  const options = period === '24ч' ? { hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short' };
+  const format = new Intl.DateTimeFormat('ru-RU', { ...options, timeZone: 'Europe/Moscow' });
+  return [0, 0.25, 0.5, 0.75, 1].map((fraction) => format.format(from + (to - from) * fraction));
 }
 function stat(label, value, unit, image, tone, detail) {
   return `<article class="panel stat"><div class="stat-top"><span>${label}</span><span class="icon-box ${tone}">${icon(image)}</span></div><div class="stat-value">${value}<span>${unit}</span></div><p>${detail}</p></article>`;
@@ -99,8 +134,8 @@ function routing() {
 function infrastructure() {
   return `<section class="panel infra"><div class="panel-top"><div><h2>Инфраструктура</h2><p>Узлы пилота eBunny</p></div><a href="#ingress" class="text-link">К входам ${icon('arrow', 15)}</a></div>
     <div class="table-wrap"><table><thead><tr><th scope="col">Узел</th><th scope="col">Назначение</th><th scope="col">Адрес</th><th scope="col">Статус</th></tr></thead><tbody>
-    <tr><td><strong>Yandex Cloud</strong></td><td>Вход MTProto</td><td class="mono">${entranceIp}</td><td>${demo ? status('В сети') : status('Нет данных', 'pink')}</td></tr>
-    <tr><td><strong>EU VPS</strong></td><td>Выход WireGuard</td><td class="mono">${exitIp}</td><td>${demo ? status('В сети') : status('Нет данных', 'pink')}</td></tr>
+    <tr><td><strong>Yandex Cloud</strong></td><td>Вход MTProto</td><td class="mono">${entranceIp()}</td><td>${demo ? status('В сети') : monitoringStatus(telemetry?.telemt, 'Метрики доступны', 'Нет ответа от Telemt')}</td></tr>
+    <tr><td><strong>EU VPS</strong></td><td>Выход WireGuard</td><td class="mono">${exitIp()}</td><td>${demo ? status('В сети') : monitoringStatus(telemetry?.wireguard, 'Пир отвечает', 'Пир не ответил')}</td></tr>
     </tbody></table></div></section>`;
 }
 function overview() {
@@ -108,9 +143,61 @@ function overview() {
     <div class="hero-art" aria-hidden="true"></div>
     <div class="hero-content"><div class="hero-status">${status('Вход MTProto')}</div><h2 id="hero-title">${domain}</h2><p>Yandex Cloud <span>→</span> WireGuard <span>→</span> Telegram</p>
     <a class="button hero-button" href="#ingress">Конфигурация входа ${icon('arrow', 16)}</a></div></section>
-    ${demo ? '' : '<p class="notice">На этой странице пока демонстрационные метрики.</p>'}<div class="stats">${stat('Соединения', '128', '', 'activity', 'lime', 'Одновременно активные')}${stat('Трафик', '34,8', 'ГиБ', 'transfer', 'pink', 'За последние 24 часа')}${stat('WireGuard', '50', 'мс', 'shield', 'violet', 'Задержка до EU-выхода')}</div>
-    <div class="dashboard-grid">${chart()}${routing()}</div>
-    ${infrastructure()}`;
+    <div id="overview-data">${overviewData()}</div>`;
+}
+
+function monitoringStatus(state, up, down) {
+  if (state === true) return status(up);
+  return status(state === false ? down : 'Нет данных', 'pink');
+}
+
+function formatBytes(bytes) {
+  const scale = Math.min(3, bytes > 0 ? Math.floor(Math.log2(bytes) / 10) : 0);
+  return [number.format(bytes / 1024 ** scale), ['Б', 'КиБ', 'МиБ', 'ГиБ'][scale]];
+}
+
+function overviewData() {
+  const last = telemetry?.observedAt && sampleTime.format(telemetry.observedAt) + ' МСК';
+  const traffic = telemetry?.traffic;
+  const [trafficValue, trafficUnit] = demo ? ['34,8', 'ГиБ'] : traffic ? formatBytes(traffic.bytes) : ['—', ''];
+  const coverage = traffic && traffic.coverageSeconds >= 85_200 ? 'За последние 24 часа' :
+    traffic ? `За ${Math.round(traffic.coverageSeconds / 60)} мин замеров за 24 ч` : 'Нужны два последовательных замера';
+  const note = telemetryError ? 'Не удалось обновить метрики.' :
+    last ? `Последний замер: ${last}${telemetry.fresh ? '' : ' · данные устарели'}` :
+      telemetry?.configured === false ? 'Сборщик метрик ещё не подключён.' : 'Ожидаем первый замер с входной ВМ.';
+  const connections = telemetry?.connections;
+  const latency = telemetry?.latency;
+  return `${demo ? '' : `<p class="notice">${note}</p>`}<div class="stats">
+    ${stat('Соединения', demo ? '128' : connections == null ? '—' : number.format(connections), '', 'activity', 'lime', 'Одновременно активные')}
+    ${stat('Трафик', trafficValue, trafficUnit, 'transfer', 'pink', demo ? 'За последние 24 часа' : coverage)}
+    ${stat('WireGuard', demo ? '50' : latency == null ? '—' : number.format(latency), demo || latency != null ? 'мс' : '', 'shield', 'violet', telemetry?.wireguard === false ? 'EU-пир не ответил' : 'Задержка до EU-выхода')}
+    </div><div class="dashboard-grid">${chart()}${routing()}</div>${infrastructure()}`;
+}
+
+async function updateOverview(root, focusPeriod = false) {
+  clearTimeout(pollTelemetry);
+  reportRequest?.abort();
+  const controller = new AbortController();
+  reportRequest = controller;
+  try {
+    const response = await fetch(`/api/telemetry?period=${periods[period]}`, { signal: controller.signal });
+    if (response.status === 401) return location.reload();
+    if (!response.ok) throw new Error();
+    const report = await response.json();
+    if (!root.isConnected || controller.signal.aborted) return;
+    telemetry = report;
+    telemetryError = false;
+  } catch {
+    if (controller.signal.aborted || !root.isConnected) return;
+    telemetryError = true;
+    telemetry = telemetry ? { ...telemetry, fresh: false, connections: null, telemt: null, wireguard: null, latency: null } : undefined;
+  }
+  const focused = focusPeriod || root.contains(document.activeElement) && document.activeElement.dataset.period;
+  root.innerHTML = overviewData();
+  if (focused) root.querySelector(`[data-period="${period}"]`).focus({ preventScroll: true });
+  pollTelemetry = setTimeout(() => {
+    if (root.isConnected) void updateOverview(root);
+  }, 30_000);
 }
 
 function ingress() {
@@ -127,7 +214,7 @@ function ingress() {
   ];
   return `<div class="detail-grid">
     <section class="panel content-panel"><div class="panel-top"><div><h2>Основной вход</h2><p>Yandex Cloud</p></div>${status('Пилот')}</div>
-    <dl class="facts"><div><dt>Домен</dt><dd class="mono">${domain}:443</dd></div><div><dt>Публичный IPv4</dt><dd class="mono">${entranceIp}</dd></div>
+    <dl class="facts"><div><dt>Домен</dt><dd class="mono">${domain}:443</dd></div><div><dt>Публичный IPv4</dt><dd class="mono">${entranceIp()}</dd></div>
     <div><dt>Протокол</dt><dd>MTProto / FakeTLS</dd></div><div><dt>Канал</dt><dd><a href="https://t.me/eBunnyVPN" target="_blank" rel="noopener noreferrer">@eBunnyVPN ${icon('external', 14)}</a></dd></div></dl></section>
     <section class="panel content-panel"><div class="panel-top"><div><h2>Профиль создания ВМ</h2><p>Для новых входов</p></div><span class="icon-box lime">${icon('server')}</span></div>
     <dl class="facts">${profile.map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="notice">${icon('info', 16)} Создание через Yandex Cloud API ещё не подключено.</p></section></div>`;
@@ -138,7 +225,7 @@ function exits() {
     <td><button class="icon-button" type="button" data-remove="${escapeText(draft.id)}" aria-label="Удалить черновик ${escapeText(draft.name)}" title="Удалить черновик">${icon('close', 16)}</button></td></tr>`).join('');
   return `<section class="panel infra"><div class="panel-top"><div><h2>Выходы WireGuard</h2><p>Основная нода и черновики подключения</p></div></div>
     <div class="table-wrap"><table><thead><tr><th scope="col">Нода</th><th scope="col">Адрес</th><th scope="col">SSH-пользователь</th><th scope="col">Статус</th><th scope="col"><span class="sr-only">Действия</span></th></tr></thead><tbody>
-    <tr><td><strong>EU VPS</strong></td><td class="mono">${exitIp}</td><td>—</td><td>${status('Пилот')}</td><td></td></tr>${rows}</tbody></table></div></section>
+    <tr><td><strong>EU VPS</strong></td><td class="mono">${exitIp()}</td><td>—</td><td>${status('Пилот')}</td><td></td></tr>${rows}</tbody></table></div></section>
     <p class="notice">${icon('info', 16)} Черновик сохраняет параметры ноды в этом браузере. Настройка VPS по SSH ещё не подключена.</p>`;
 }
 
@@ -150,6 +237,8 @@ function journal() {
 
 const pages = { overview, ingress, exits, checks: () => checks(demo), audience: () => audience(demo), journal };
 function render() {
+  clearTimeout(pollTelemetry);
+  reportRequest?.abort();
   const route = location.hash.slice(1);
   const active = Object.hasOwn(pages, route) ? route : 'overview';
   navigation.innerHTML = Object.entries(sections).map(([key, [label, symbol]]) =>
@@ -158,6 +247,7 @@ function render() {
     ${demo ? '<span class="demo-badge"><i></i>Демо-режим</span>' : '<button type="button" class="button" data-logout>Выйти</button>'}<button class="button primary" type="button" data-add>${icon('plus', 17)} Добавить EU-ноду</button>
     </div></header><div class="page-content">${pages[active]()}</div>`;
   document.title = `${sections[active][0]} · eBunny`;
+  if (active === 'overview' && !demo) void updateOverview(main.querySelector('#overview-data'));
   if (active === 'checks' && !demo) void mountChecks(main.querySelector('#bscheck-app'));
   if (active === 'audience') {
     const container = main.querySelector('#audience-report');
@@ -245,8 +335,10 @@ main.addEventListener('click', async (event) => {
   const periodButton = event.target.closest('[data-period]');
   if (periodButton) {
     period = periodButton.dataset.period;
-    main.querySelector('.chart-panel').outerHTML = chart();
-    main.querySelector(`[data-period="${period}"]`).focus();
+    if (demo) {
+      main.querySelector('.chart-panel').outerHTML = chart();
+      main.querySelector(`[data-period="${period}"]`).focus();
+    } else void updateOverview(main.querySelector('#overview-data'), true);
   }
   const remove = event.target.closest('[data-remove]');
   if (remove) {
