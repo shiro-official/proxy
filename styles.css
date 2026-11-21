@@ -288,6 +288,10 @@ button:disabled { opacity: .6; cursor: wait; }
 .rollout-projects { margin-top: 14px; border-top: 1px solid var(--line); }
 .rollout-projects summary { padding: 12px 0; cursor: pointer; }
 .rollout-project { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 15px; padding: 10px 0; }
-.rollout-project > div { margin-right: auto; }
+.rollout-project > div:first-child { margin-right: auto; }
 .rollout-project label { margin: 0; }
 .rollout-project select { padding: 7px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: #111117; font: inherit; }
+.rollout-project-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.rollout-check-feedback { flex-basis: 100%; }
+.rollout-check-feedback:empty { display: none; }

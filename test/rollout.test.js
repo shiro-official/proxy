@@ -101,7 +101,7 @@ test('manual rollout creates one reserve and switches the existing DNS record on
   assert.doesNotMatch(JSON.stringify(controls.overview()), /PRIVATE KEY|test-token/);
 });
 
-test('uses official user OAuth and skips projects marked exhausted when choosing by priority', async (t) => {
+test('checks official user OAuth without creating a VM and requires explicit project selection', async (t) => {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   const project = {
@@ -118,14 +118,19 @@ test('uses official user OAuth and skips projects marked exhausted when choosing
   const sent = [];
   const rollout = createRollout(db, config, async (url, init) => {
     const host = new URL(url).hostname;
-    const body = JSON.parse(init.body);
-    sent.push(host);
+    const body = init.body && JSON.parse(init.body);
+    sent.push(`${host} ${init.method}`);
     if (host === 'iam.api.cloud.yandex.net') {
       assert.deepEqual(body, { yandexPassportOauthToken: spareToken });
       return Response.json({ iamToken: 'short-lived-token' });
     }
     assert.equal(host, 'compute.api.cloud.yandex.net');
     assert.equal(init.headers.Authorization, 'Bearer short-lived-token');
+    if (init.method === 'GET') {
+      assert.equal(new URL(url).searchParams.get('folderId'), spare.folderId);
+      assert.equal(new URL(url).searchParams.get('pageSize'), '1');
+      return Response.json({ instances: [] });
+    }
     assert.equal(body.folderId, spare.folderId);
     assert(!JSON.stringify(body).includes(spareToken));
     return Response.json({ id: 'operation2' });
@@ -133,15 +138,18 @@ test('uses official user OAuth and skips projects marked exhausted when choosing
 
   assert.deepEqual(rollout.overview().projects.map(({ id, auth }) => [id, auth]), [['primary', 'oauth'], ['backup', 'oauth']]);
   rollout.setGrantState({ project: 'primary', state: 'exhausted' });
-  await assert.rejects(rollout.reserve({ project: 'primary', requestId: randomUUID(), confirmCost: true }), /нет доступного проекта/i);
-  const request = { project: null, requestId: randomUUID(), confirmCost: true };
+  await assert.rejects(rollout.reserve({ project: 'primary', requestId: randomUUID(), confirmCost: true }), /проект недоступен/i);
+  await assert.rejects(rollout.reserve({ project: null, requestId: randomUUID(), confirmCost: true }), /ещё не подключён/i);
+  assert.deepEqual(await rollout.checkProject({ project: 'backup' }), { ok: true, project: 'backup' });
+  assert.equal(rollout.overview().candidates.length, 0);
+  const request = { project: 'backup', requestId: randomUUID(), confirmCost: true };
   const created = await rollout.reserve(request);
   assert.equal(created.project, 'backup');
   assert.equal(created.state, 'pending');
   rollout.setGrantState({ project: 'backup', state: 'paused' });
   assert.equal((await rollout.reserve(request)).id, created.id);
-  await assert.rejects(rollout.reserve({ ...request, requestId: randomUUID() }), /нет доступного проекта/i);
-  assert.deepEqual(sent, ['iam.api.cloud.yandex.net', 'compute.api.cloud.yandex.net']);
+  await assert.rejects(rollout.reserve({ ...request, requestId: randomUUID() }), /проект недоступен/i);
+  assert.deepEqual(sent, ['iam.api.cloud.yandex.net POST', 'compute.api.cloud.yandex.net GET', 'compute.api.cloud.yandex.net POST']);
   const publicState = JSON.stringify(rollout.overview());
   assert(!publicState.includes(firstToken));
   assert(!publicState.includes(spareToken));

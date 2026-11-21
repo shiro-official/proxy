@@ -56,11 +56,13 @@ function projectsSection(projects) {
       <div><strong>${escape(project.name)}</strong><p class="notice">Приоритет ${project.priority} · ${project.auth === 'oauth' ? 'OAuth' : 'Сервисный аккаунт'}${project.grantUpdated ? ` · ${time.format(project.grantUpdated)} МСК` : ''}</p></div>
       <label>Состояние<select name="grant">${Object.entries(grantText).map(([state, label]) =>
         `<option value="${state}"${state === project.grantState ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
-      <button class="button" type="submit">Сохранить состояние</button>
+      <div class="rollout-project-actions"><button class="button" type="button" data-check="${escape(project.id)}">Проверить доступ</button>
+      <button class="button" type="submit">Сохранить состояние</button></div>
+      <p class="notice rollout-check-feedback" role="status"></p>
     </form>`).join('')}</details>
     ${available.length ? `<form class="rollout-form" data-create>
-      <label>Проект Яндекса<select name="project">
-        <option value="">По приоритету · ${escape(available[0].name)}</option>
+      <label>Проект Яндекса<select name="project" required>
+        <option value="" disabled selected>Выбери проект</option>
         ${available.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)}</option>`).join('')}
       </select></label>
       <label class="bs-checkbox"><input type="checkbox" required> Подтверждаю создание платной ВМ по профилю, указанному выше.</label>
@@ -99,19 +101,19 @@ export async function mountRollout(root, message = '') {
   }
   if (!root.isConnected) return;
   root.innerHTML = page(data, dns, dnsError);
-  const notification = root.querySelector('[role="status"]');
+  const notification = root.querySelector('.form-error');
   notification.textContent = message;
   const buttons = [...root.querySelectorAll('button')];
   let busy = false;
-  const run = async (action) => {
+  const run = async (action, feedback = notification) => {
     if (busy) return;
     busy = true;
     buttons.forEach((button) => { button.disabled = true; });
-    notification.textContent = 'Операция выполняется…';
+    feedback.textContent = 'Операция выполняется…';
     try {
       await action();
     } catch (error) {
-      notification.textContent = error.message;
+      feedback.textContent = error.message;
     } finally {
       busy = false;
       buttons.forEach((button) => { button.disabled = false; });
@@ -126,10 +128,17 @@ export async function mountRollout(root, message = '') {
       event.preventDefault();
       void run(async () => {
         requestId ??= crypto.randomUUID();
-        const row = await api('/reserve', { requestId, project: create.elements.project.value || null, confirmCost: true });
+        const row = await api('/reserve', { requestId, project: create.elements.project.value, confirmCost: true });
         await mountRollout(root, row.state === 'pending' ? 'Запрос на создание принят. Обнови статус ВМ.' : stateText[row.state]);
       });
     };
+  }
+  for (const button of root.querySelectorAll('[data-check]')) {
+    const feedback = button.closest('form').querySelector('.rollout-check-feedback');
+    button.onclick = () => void run(async () => {
+      await api('/check', { project: button.dataset.check });
+      feedback.textContent = 'Вход и чтение списка ВМ подтверждены. Права на создание проверяются отдельно.';
+    }, feedback);
   }
   for (const form of root.querySelectorAll('[data-grant]')) {
     form.onsubmit = (event) => {

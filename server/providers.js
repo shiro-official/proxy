@@ -118,10 +118,10 @@ export function vmRequest(project, name) {
 
 export function createProviders(config, requestFetch) {
   const tokens = new Map();
-  async function getToken(project) {
+  async function getToken(project, force = false) {
     const existing = tokens.get(project.id);
     const now = Date.now();
-    if (existing && existing.expires > now + 60_000) return existing.token;
+    if (!force && existing && existing.expires > now + 60_000) return existing.token;
     const body = project.oauthToken
       ? { yandexPassportOauthToken: project.oauthToken }
       : { jwt: jwt(project.key, now) };
@@ -156,6 +156,12 @@ export function createProviders(config, requestFetch) {
 
   return {
     prepareProject: async (project) => { await getToken(project); },
+    async checkProject(project) {
+      const accessToken = await getToken(project, true);
+      const query = new URLSearchParams({ folderId: project.folderId, pageSize: '1' });
+      const data = await api(requestFetch, 'Yandex Compute', `${computeUrl}?${query}`, { token: accessToken });
+      if (!Array.isArray(data.instances ?? [])) throw new ProviderError('Yandex Compute', null);
+    },
     create: (project, name) => compute(project, computeUrl, { method: 'POST', body: vmRequest(project, name) }),
     operation: (project, id) => compute(project, `${operationsUrl}/${encodeURIComponent(id)}`),
     instance: (project, id) => compute(project, `${computeUrl}/${encodeURIComponent(id)}`),

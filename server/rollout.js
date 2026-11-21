@@ -88,6 +88,11 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
       };
     },
     dns: providers.dns,
+    async checkProject(body) {
+      const project = projectFor(body?.project);
+      await providers.checkProject(project);
+      return { ok: true, project: project.id };
+    },
     setGrantState(body) {
       const project = projectFor(body?.project);
       if (!grantStates.includes(body?.state)) throw new RequestError(400, 'Неизвестное состояние проекта.');
@@ -100,20 +105,18 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
         throw new RequestError(400, 'Подтверди создание платной ВМ.');
       }
       const id = body.requestId;
-      const preferred = body.project === null;
+      const project = projectFor(body.project);
       const matchingOperation = () => {
         const row = rowFor.get(id);
-        if (row && !preferred && row.project !== body.project) {
+        if (row && row.project !== project.id) {
           throw new RequestError(409, 'Идентификатор уже использован для другого проекта.');
         }
         return row;
       };
       const prior = matchingOperation();
       if (prior) return prior;
-      const project = preferred
-        ? orderedProjects.find((item) => grantState(item) === 'available') : projectFor(body.project);
-      if (!project || grantState(project) !== 'available') {
-        throw new RequestError(409, 'Нет доступного проекта. Сверь состояние в Billing.');
+      if (grantState(project) !== 'available') {
+        throw new RequestError(409, 'Выбранный проект недоступен для создания ВМ. Сверь состояние в Billing.');
       }
       await providers.prepareProject(project);
       const concurrent = matchingOperation();
