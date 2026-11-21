@@ -30,12 +30,16 @@ async function api(path = '', body) {
 function candidateCard(row, dns, projects) {
   const canRefresh = !['active', 'failed'].includes(row.state);
   const canPublish = row.state === 'prepared' && row.ip && dns?.ip;
+  const permissionDenied = row.state === 'failed' &&
+    /^Yandex Compute: (HTTP 403|PERMISSION_DENIED)/.test(row.message ?? '');
   return `<article class="rollout-candidate">
     <div class="panel-top"><div><h3>${escape(row.name)}</h3><p>${escape(projects.find(({ id }) => id === row.project)?.name ?? row.project)} · ${time.format(row.created)} МСК</p></div>
       <span class="status ${row.state === 'active' ? 'lime' : 'pink'}"><i></i>${stateText[row.state]}</span></div>
     ${row.operation_id ? `<p class="notice">Операция Яндекса: <code>${escape(row.operation_id)}</code></p>` : ''}
     ${row.ip ? `<p class="rollout-ip mono">${escape(row.ip)}:443</p>` : ''}
     ${row.message ? `<p class="notice">${escape(row.message)}</p>` : ''}
+    ${permissionDenied ? `<p class="notice">Для ВМ с публичным IPv4 проверь роли <code>compute.editor</code> и <code>vpc.publicAdmin</code> у сервисного аккаунта в каталоге.
+      <a class="text-link" href="https://yandex.cloud/ru/docs/compute/security/#choosing-roles" target="_blank" rel="noopener noreferrer">Роли в документации Яндекса</a></p>` : ''}
     ${row.state === 'prepared' ? '<p class="notice">Настрой WireGuard и Telemt на резерве и проверь подключение по его адресу.</p>' : ''}
     ${row.state === 'uncertain' ? '<p class="notice">Обновление статуса проверяет уже отправленную операцию.</p>' : ''}
     ${canRefresh ? `<button class="button" type="button" data-refresh="${escape(row.id)}">Обновить статус ВМ</button>` : ''}

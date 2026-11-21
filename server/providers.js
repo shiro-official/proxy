@@ -72,8 +72,8 @@ export function validateCloudConfig(value) {
 }
 
 class ProviderError extends RequestError {
-  constructor(provider, upstreamStatus, code) {
-    super(502, `${provider}: ${upstreamStatus ? `HTTP ${upstreamStatus}` : 'ответ не получен'}${code ? ` (${code})` : ''}.`);
+  constructor(provider, upstreamStatus, code, requestId) {
+    super(502, `${provider}: ${upstreamStatus ? `HTTP ${upstreamStatus}` : 'ответ не получен'}${code ? ` (${code})` : ''}.${requestId ? ` ID запроса: ${requestId}.` : ''}`);
     this.upstreamStatus = upstreamStatus;
   }
 }
@@ -90,7 +90,9 @@ async function api(requestFetch, provider, url, { method = 'GET', body, token } 
   }).catch(() => { throw new ProviderError(provider, null); });
   const data = await response.json().catch(() => null);
   if (!response.ok || !data || data.success === false) {
-    throw new ProviderError(provider, response.status, asCode(data?.errors?.[0]?.code ?? data?.code));
+    const trace = (response.headers.get('x-request-id') ?? response.headers.get('x-server-trace-id') ?? '').trim();
+    const requestId = /^[A-Za-z0-9._-]{6,120}$/.test(trace) ? trace : null;
+    throw new ProviderError(provider, response.status, asCode(data?.errors?.[0]?.code ?? data?.code), requestId);
   }
   return data;
 }

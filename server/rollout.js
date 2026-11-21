@@ -239,7 +239,10 @@ export function createRollout(db, config, requestFetch, tcp = probeTcp) {
         if (row.operation_id) {
           const op = await providers.operation(project, row.operation_id);
           if (op.error) {
-            update.run('failed', 'Yandex Cloud завершил создание ВМ с ошибкой.', row.id);
+            const message = String(op.error.code) === '7'
+              ? 'Yandex Compute: PERMISSION_DENIED (7).'
+              : 'Yandex Cloud завершил создание ВМ с ошибкой.';
+            update.run('failed', message, row.id);
             return rowFor.get(row.id);
           }
           if (!op.done) return row;

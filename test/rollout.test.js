@@ -23,6 +23,7 @@ test('manual rollout creates one reserve and switches the existing DNS record on
   let nextIp = active;
   let patchCalls = 0;
   let createCalls = 0;
+  let denied = false;
   let ready = false;
   let createBody;
   let tcpOpen = false;
@@ -41,6 +42,9 @@ test('manual rollout creates one reserve and switches the existing DNS record on
       assert.equal(options.headers.Authorization, 'Bearer test-token');
       createCalls += 1;
       createBody = body;
+      if (denied) return Response.json({ code: 7, message: 'Sensitive test response' }, {
+        status: 403, headers: { 'x-request-id': 'request-for-support' },
+      });
       return Response.json({ id: 'operation1' });
     }
     if (parsed.hostname === 'operation.api.cloud.yandex.net') {
@@ -98,7 +102,12 @@ test('manual rollout creates one reserve and switches the existing DNS record on
   assert.equal(patchCalls, 1);
   assert.equal(controls.overview().switches[0].previous_ip, active);
   assert.equal(controls.overview().candidates[0].state, 'active');
-  assert.doesNotMatch(JSON.stringify(controls.overview()), /PRIVATE KEY|test-token/);
+  denied = true;
+  const failed = await controls.reserve({ requestId: randomUUID(), project: 'pilot', confirmCost: true });
+  assert.equal(failed.state, 'failed');
+  assert.match(failed.message, /HTTP 403 \(7\).*request-for-support/);
+  assert.equal(patchCalls, 1);
+  assert.doesNotMatch(JSON.stringify(controls.overview()), /PRIVATE KEY|test-token|Sensitive test response/);
 });
 
 test('checks official user OAuth without creating a VM and requires explicit project selection', async (t) => {
